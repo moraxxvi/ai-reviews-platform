@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+data/*.csv
+data/shop.db
+models/rubert*/
+models/metrics_rubert.json
+models/*.joblib

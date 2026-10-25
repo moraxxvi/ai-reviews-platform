@@ -1,0 +1,15 @@
+{
+  "data_source": "реальный датасет: data/data.csv (выборка 60000)",
+  "sentiment": {
+    "macro_f1": 0.6658904708727723,
+    "accuracy": 0.8181666666666667,
+    "n_train": 48000,
+    "n_test": 12000
+  },
+  "intents": {
+    "macro_f1": 1.0,
+    "accuracy": 1.0,
+    "n_train": 576,
+    "n_test": 144
+  }
+}

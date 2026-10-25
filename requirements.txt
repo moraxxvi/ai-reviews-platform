@@ -1,0 +1,15 @@
+# Обязательные (запуск и опорная модель)
+fastapi>=0.110
+uvicorn>=0.29
+scikit-learn>=1.3
+numpy>=1.24
+pandas>=2.0
+joblib>=1.3
+
+# Необязательные
+pymorphy3>=2.0
+pymorphy3-dicts-ru
+# --- для RuBERT и sentence-transformers (не проверено в среде разработки, см. README) ---
+# torch
+# transformers
+# sentence-transformers

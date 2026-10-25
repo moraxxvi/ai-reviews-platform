@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Market — AI-консультант</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="demo-bar">Учебный проект (СРО3). Отзывы и товары в базе — демонстрационные, тексты отзывов сгенерированы по шаблонам.</div>
+<header class="top">
+  <div class="wrap top-in">
+    <a class="logo" href="#/"><span class="logo-mark">AI</span>Market</a>
+    <nav>
+      <a href="#/" data-nav="home">Главная</a>
+      <a href="#/catalog" data-nav="catalog">Каталог</a>
+      <a href="#/compare" data-nav="compare">Сравнение <span id="cmp-count" class="pill" hidden>0</span></a>
+    </nav>
+    <form id="search" class="search" role="search">
+      <input id="q" type="search" placeholder="Что вы ищете? Например: батарея держит долго" aria-label="Поиск">
+    </form>
+    <a class="seller-link" href="#/seller">Для продавцов</a>
+    <button id="auth-btn" class="avatar" type="button" title="Войти">Войти</button>
+  </div>
+</header>
+
+<main id="view" class="wrap" tabindex="-1"></main>
+
+<button id="chat-fab" class="fab" type="button"><span class="spark">✦</span> AI-консультант</button>
+
+<section id="chat" class="chat" hidden aria-label="AI-консультант">
+  <div class="chat-head">
+    <div><strong>✦ AI-консультант</strong><div class="chat-sub" id="chat-model">отвечает по отзывам покупателей</div></div>
+    <div class="chat-actions">
+      <button id="chat-hist" type="button" title="История диалогов">История</button>
+      <button id="chat-new" type="button" title="Новый диалог">Новый</button>
+      <button id="chat-close" type="button" aria-label="Закрыть">✕</button>
+    </div>
+  </div>
+  <div id="chat-history" class="chat-history" hidden></div>
+  <div id="chat-log" class="chat-log" aria-live="polite"></div>
+  <div id="chat-chips" class="chips"></div>
+  <form id="chat-form" class="chat-form">
+    <input id="chat-input" type="text" maxlength="1000" placeholder="Задайте вопрос о товаре…" autocomplete="off" aria-label="Сообщение">
+    <button type="submit">Отправить</button>
+  </form>
+</section>
+
+<dialog id="auth-dlg" class="dlg">
+  <form method="dialog" id="auth-form">
+    <h3 id="auth-title">Вход</h3>
+    <label>Email <input id="auth-email" type="email" required></label>
+    <label>Пароль <input id="auth-pass" type="password" required minlength="6"></label>
+    <p id="auth-err" class="err" role="alert"></p>
+    <div class="dlg-row">
+      <button type="submit" class="btn primary" id="auth-submit">Войти</button>
+      <button type="button" class="btn" id="auth-switch">Регистрация</button>
+      <button type="button" class="btn" id="auth-cancel">Отмена</button>
+    </div>
+    <p class="hint">Демо-доступ: buyer@demo.kz / buyer123 · seller@demo.kz / seller123</p>
+  </form>
+</dialog>
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

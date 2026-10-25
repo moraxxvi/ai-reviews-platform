@@ -1,0 +1,8 @@
+{
+  "model": "DeepPavlov/rubert-base-cased-conversational",
+  "macro_f1": 0.5910419113906912,
+  "accuracy": 0.8016666666666666,
+  "n_train": 4800,
+  "n_test": 1200,
+  "epochs": 2
+}
