@@ -15,6 +15,8 @@ WEB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 
 
 def create_app():
+    from app.bootstrap import refresh_demo_dates
+    refresh_demo_dates()
     app = Flask(__name__, static_folder=None)
 
     def make(handler):

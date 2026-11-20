@@ -204,6 +204,19 @@ class TestApi(unittest.TestCase):
         self.assertTrue(j.get("clarify"))
         self.assertIn("Уточните", j["reply"])
 
+    def test_unknown_model_number_is_reported(self):
+        j = self.c.post("/api/chat", json={"message": "как батарея у iPhone 18 pro max"}).get_json()
+        self.assertIn("в каталоге нет", j["reply"])
+        self.assertEqual(j["sources"], [])
+
+    def test_alert_window_survives_old_demo_data(self):
+        from app import bootstrap, db
+        with db.session() as conn:
+            conn.execute("UPDATE reviews SET date = strftime('%Y-%m-%dT%H:%M:%S', date, '-40 days')")
+        bootstrap.refresh_demo_dates()
+        a = self.c.get("/api/seller/analytics", headers=self.login("seller@demo.kz", "seller123")).get_json()
+        self.assertTrue(any(x["aspect"] == "нагрев" for x in a["alerts"]))
+
     def test_catalog_has_30_products(self):
         self.assertEqual(len(self.c.get("/api/products").get_json()["items"]), 30)
 
@@ -220,6 +233,14 @@ class TestApi(unittest.TestCase):
         self.assertTrue(sus["total"] > 0 and all(r["suspicious"] for r in sus["reviews"]))
         asp = self.c.get("/api/seller/reviews?aspect=нагрев&aspect_sentiment=negative", headers=h).get_json()
         self.assertTrue(asp["reviews"] and all(any(a["aspect"] == "нагрев" for a in r["aspects"]) for r in asp["reviews"]))
+
+    def test_brand_vs_brand_comparison(self):
+        j = self.c.post("/api/chat", json={"message": "Что лучше Xiaomi или Iphone"}).get_json()
+        self.assertEqual(j["intent"], "сравнение")
+        brands = {p["title"].split()[0] for p in j["products"]}
+        self.assertEqual(len(j["products"]), 2)
+        self.assertNotEqual(j["products"][0]["title"].split()[0], j["products"][1]["title"].split()[0])
+        self.assertIn("Итог по отзывам", j["reply"])
 
     def test_analyze_text(self):
         j = self.c.post("/api/analyze", json={"text": "Камера отличная, но сильно греется"}).get_json()

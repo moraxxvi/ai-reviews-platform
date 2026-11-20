@@ -88,6 +88,32 @@ def handle_message(conn, user, body):
     return result
 
 
+def _brand_models(products, brand, limit=4):
+    own = sorted((p for p in products if (p.get("brand") or "").lower() == (brand or "").lower()), key=lambda p: -(p.get("rating") or 0))
+    return ", ".join(p["title"] for p in own[:limit])
+
+
+def _unknown_model(text, ents, products):
+    """Бренд назван, а номер модели (например, «iPhone 18») в каталоге отсутствует -> честно сообщаем, а не гадаем."""
+    import re as _re
+    found = _brands_in(text, products)
+    if len(found) != 1:
+        return None
+    brand = found[0]
+    own = [p for p in products if (p.get("brand") or "").lower() == brand.lower()]
+    if not own:
+        return None
+    nums = set(_re.findall(r"(?<!\d)(\d{2})(?!\d)", text))
+    if not nums:
+        return None
+    titles_digits = set()
+    for p in own:
+        titles_digits.update(_re.findall(r"\d+", p["title"]))
+    if nums & titles_digits:
+        return None
+    return f"Модели с номером {', '.join(sorted(nums))} у бренда {own[0]['brand']} в каталоге нет. Сейчас доступны: {_brand_models(products, own[0]['brand'])}. Спросите про любую из них."
+
+
 def _empty(reply, intent=None, conf=0.0, ents=None, **kw):
     r = {"reply": reply, "intent": intent, "confidence": round(conf, 3), "entities": ents or {}, "products": [], "sources": [], "escalate": False}
     r.update(kw)
@@ -99,6 +125,10 @@ def _respond(conn, text, ctx, dialog):
     intent, conf = _clf().predict(text)
     ents = intents_mod.extract_entities(text, products)
     by_id = {p["product_id"]: p for p in products}
+
+    unknown = _unknown_model(text, ents, products)
+    if unknown and intent in ("вопрос_о_товаре", "сравнение", None) or (unknown and conf < intents_mod.CONF_THRESHOLD):
+        return _empty(unknown, intent, conf, ents, clarify=True)
 
     if conf < intents_mod.CONF_THRESHOLD:
         return _empty("Не совсем понял вопрос. Уточните, пожалуйста: вы хотите подобрать товар, узнать мнение покупателей о конкретной модели или сравнить несколько? Например: «смартфон до 300 000 ₸ с хорошей камерой».",
