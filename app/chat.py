@@ -126,6 +126,18 @@ def _respond(conn, text, ctx, dialog):
     ents = intents_mod.extract_entities(text, products)
     by_id = {p["product_id"]: p for p in products}
 
+    low = text.lower().strip(" !.?")
+    if low in _THANKS:
+        return _empty("Пожалуйста! Если нужно подобрать или сравнить что-то ещё, спрашивайте.", "приветствие", 1.0, ents)
+    if low in _HELLO:
+        return _empty("Здравствуйте! Я AI-консультант. Помогаю подобрать товар по отзывам реальных покупателей, отвечаю на вопросы о моделях и сравниваю их. С чего начнём?", "приветствие", 1.0, ents)
+    # поправки к классификатору намерений: явные признаки важнее его вероятностей
+    has_item = bool(ents["products"] or ents["aspects"])
+    if intent == "доставка_возврат" and has_item and not any(k in low for k in _DELIVERY_KEYS):
+        intent, conf = "вопрос_о_товаре", max(conf, 0.6)
+    if intent == "сравнение" and len(ents["products"]) <= 1 and len(_brands_in(text, products)) < 2 and not any(k in low for k in _COMPARE_KEYS):
+        intent, conf = "вопрос_о_товаре", max(conf, 0.6)
+
     unknown = _unknown_model(text, ents, products)
     if unknown and intent in ("вопрос_о_товаре", "сравнение", None) or (unknown and conf < intents_mod.CONF_THRESHOLD):
         return _empty(unknown, intent, conf, ents, clarify=True)
@@ -167,6 +179,11 @@ def _respond(conn, text, ctx, dialog):
     # вопрос_о_товаре
     return _product_question(conn, text, ctx, ents, intent, conf, by_id)
 
+
+_THANKS = {"спасибо", "благодарю", "спс", "thanks", "thank you", "спасибо большое"}
+_HELLO = {"hello", "hi", "hey", "хай", "хелло", "салем", "сәлем"}
+_DELIVERY_KEYS = ("достав", "возврат", "вернуть", "самовывоз", "заказ", "посылк", "гарант", "оплат", "курьер")
+_COMPARE_KEYS = ("сравн", "лучше", " или ", "отличается", "отличия", "разниц", " vs ", "против", "что выбрать")
 
 _BRAND_HINTS = {"iphone": "Apple", "айфон": "Apple", "macbook": "Apple", "airpods": "Apple", "galaxy": "Samsung", "самсунг": "Samsung", "pixel": "Google",
                 "redmi": "Xiaomi", "poco": "Xiaomi", "сяоми": "Xiaomi", "ксиаоми": "Xiaomi", "эппл": "Apple", "асус": "ASUS", "леново": "Lenovo", "сони": "Sony",
@@ -305,7 +322,7 @@ def _quotes(conn, product_id, qvec, aspects):
     return out
 
 
-_GENERAL = ("что говорят", "что пишут", "минус", "плюс", "отзыв", "расскажи", "стоит ли", "покупатели", "мнение", "как себя", "в целом", "достоинств", "недостатк", "проблем")
+_GENERAL = ("что говорят", "что пишут", "минус", "плюс", "отзыв", "расскажи", "стоит ли", "покупатели", "мнение", "как себя", "в целом", "достоинств", "недостатк", "проблем", "скажешь", "думаешь", "обзор", "рекомендуешь", "брать", "что за", "расскажите", "как тебе", "что можешь сказать")
 
 
 def _product_question(conn, text, ctx, ents, intent, conf, by_id):

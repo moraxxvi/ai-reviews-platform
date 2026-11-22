@@ -1,0 +1,39 @@
+--- a/ai/preprocess.py
++++ b/ai/preprocess.py
+@@ -26,6 +26,9 @@
+ _CLAUSE_SPLIT = re.compile(r"[.!?;,]+|\b(?:но|зато|однако|хотя)\b", re.I)
+ 
+ 
++_FILLER = {"очень", "еще", "так", "вообще", "просто", "тоже", "да", "нет", "и", "а", "все", "ну"}
++
++
+ def clean(text: str) -> str:
+     """Удаляет разметку и служебные символы, нормализует регистр и пробелы."""
+     text = _HTML.sub(" ", text or "")
+@@ -49,8 +52,9 @@
+     parts = [p.strip(" ,-") for p in _CLAUSE_SPLIT.split(text) if p and p.strip(" ,-")]
+     merged = []
+     for p in parts:
+-        # слишком короткие обрывки («очень», «ещё») присоединяем к соседней клаузе
+-        if len(p.split()) < 2 and merged:
++        # служебные обрывки («очень», «ещё») присоединяем к соседней клаузе;
++        # однословные содержательные части («греется») остаются отдельной клаузой
++        if len(p.split()) < 2 and merged and (p in _FILLER or len(p) < 4):
+             merged[-1] += " " + p
+         else:
+             merged.append(p)
+--- a/tests/test_all.py
++++ b/tests/test_all.py
+@@ -299,6 +299,12 @@
+         self.assertEqual(r("батарея не держит заряд"), "negative")
+         self.assertIsNone(r("камера отличная"))
+ 
++    def test_one_word_clause_after_but_is_kept(self):
++        """«камера крутая, но греется»: однословная часть после «но» не должна склеиваться с предыдущей."""
++        from ai.preprocess import split_clauses
++        self.assertEqual(split_clauses("камера крутая, но греется"), ["камера крутая", "греется"])
++        self.assertEqual(split_clauses("батарея держит, очень"), ["батарея держит очень"])
++
+ 
+ if __name__ == "__main__":
+     unittest.main(verbosity=2)

@@ -26,6 +26,9 @@ _KEEP = re.compile(r"[^0-9a-zA-Zа-яА-ЯёЁ\s.,!?;:()\-+%₸" + _EMOJI_POS + 
 _CLAUSE_SPLIT = re.compile(r"[.!?;,]+|\b(?:но|зато|однако|хотя)\b", re.I)
 
 
+_FILLER = {"очень", "еще", "так", "вообще", "просто", "тоже", "да", "нет", "и", "а", "все", "ну"}
+
+
 def clean(text: str) -> str:
     """Удаляет разметку и служебные символы, нормализует регистр и пробелы."""
     text = _HTML.sub(" ", text or "")
@@ -49,8 +52,9 @@ def split_clauses(text: str):
     parts = [p.strip(" ,-") for p in _CLAUSE_SPLIT.split(text) if p and p.strip(" ,-")]
     merged = []
     for p in parts:
-        # слишком короткие обрывки («очень», «ещё») присоединяем к соседней клаузе
-        if len(p.split()) < 2 and merged:
+        # служебные обрывки («очень», «ещё») присоединяем к соседней клаузе;
+        # однословные содержательные части («греется») остаются отдельной клаузой
+        if len(p.split()) < 2 and merged and (p in _FILLER or len(p) < 4):
             merged[-1] += " " + p
         else:
             merged.append(p)

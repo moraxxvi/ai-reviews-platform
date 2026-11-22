@@ -107,9 +107,16 @@ def extract_brand(text):
     return None
 
 
+_TRANSLIT = {"пиксель": "pixel", "айфон": "iphone", "самсунг": "samsung", "галакси": "galaxy", "сони": "sony", "хонор": "honor",
+             "хуавей": "huawei", "аирподс": "airpods", "эирподс": "airpods", "макбук": "macbook", "делл": "dell", "бозе": "bose",
+             "поко": "poco", "редми": "redmi", "асус": "asus", "леново": "lenovo", "джбл": "jbl", "сяоми": "xiaomi"}
+
+
 def match_products_scored(text, products):
-    """Возвращает [(product_id, вес совпадения)] по убыванию. Товар найден, если вес >= 1."""
+    """Возвращает [(product_id, вес совпадения)] по убыванию. Товар найден, если вес >= 1.
+    Если в запросе назван бренд товара, совпадение усиливается (так «honor 200» находит HONOR 200)."""
     q = set(clean(text).split())
+    q |= {_TRANSLIT[t] for t in q if t in _TRANSLIT}
     scored = []
     for p in products:
         brand_tokens = set(clean(p.get("brand") or "").split())
@@ -123,6 +130,8 @@ def match_products_scored(text, products):
                 w += 0.5
             else:
                 w += 1.0
+        if w > 0 and brand_tokens & q:
+            w += 0.5
         if w >= 1.0:
             scored.append((p["product_id"], w))
     scored.sort(key=lambda t: -t[1])

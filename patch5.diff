@@ -1,0 +1,97 @@
+diff --git a/ai/intents.py b/ai/intents.py
+index c60cde9..af44908 100644
+--- a/ai/intents.py
++++ b/ai/intents.py
+@@ -107,9 +107,16 @@ def extract_brand(text):
+     return None
+ 
+ 
++_TRANSLIT = {"пиксель": "pixel", "айфон": "iphone", "самсунг": "samsung", "галакси": "galaxy", "сони": "sony", "хонор": "honor",
++             "хуавей": "huawei", "аирподс": "airpods", "эирподс": "airpods", "макбук": "macbook", "делл": "dell", "бозе": "bose",
++             "поко": "poco", "редми": "redmi", "асус": "asus", "леново": "lenovo", "джбл": "jbl", "сяоми": "xiaomi"}
++
++
+ def match_products_scored(text, products):
+-    """Возвращает [(product_id, вес совпадения)] по убыванию. Товар найден, если вес >= 1."""
++    """Возвращает [(product_id, вес совпадения)] по убыванию. Товар найден, если вес >= 1.
++    Если в запросе назван бренд товара, совпадение усиливается (так «honor 200» находит HONOR 200)."""
+     q = set(clean(text).split())
++    q |= {_TRANSLIT[t] for t in q if t in _TRANSLIT}
+     scored = []
+     for p in products:
+         brand_tokens = set(clean(p.get("brand") or "").split())
+@@ -123,6 +130,8 @@ def match_products_scored(text, products):
+                 w += 0.5
+             else:
+                 w += 1.0
++        if w > 0 and brand_tokens & q:
++            w += 0.5
+         if w >= 1.0:
+             scored.append((p["product_id"], w))
+     scored.sort(key=lambda t: -t[1])
+diff --git a/app/chat.py b/app/chat.py
+index 78e9c71..496b8c4 100644
+--- a/app/chat.py
++++ b/app/chat.py
+@@ -126,6 +126,18 @@ def _respond(conn, text, ctx, dialog):
+     ents = intents_mod.extract_entities(text, products)
+     by_id = {p["product_id"]: p for p in products}
+ 
++    low = text.lower().strip(" !.?")
++    if low in _THANKS:
++        return _empty("Пожалуйста! Если нужно подобрать или сравнить что-то ещё, спрашивайте.", "приветствие", 1.0, ents)
++    if low in _HELLO:
++        return _empty("Здравствуйте! Я AI-консультант. Помогаю подобрать товар по отзывам реальных покупателей, отвечаю на вопросы о моделях и сравниваю их. С чего начнём?", "приветствие", 1.0, ents)
++    # поправки к классификатору намерений: явные признаки важнее его вероятностей
++    has_item = bool(ents["products"] or ents["aspects"])
++    if intent == "доставка_возврат" and has_item and not any(k in low for k in _DELIVERY_KEYS):
++        intent, conf = "вопрос_о_товаре", max(conf, 0.6)
++    if intent == "сравнение" and len(ents["products"]) <= 1 and len(_brands_in(text, products)) < 2 and not any(k in low for k in _COMPARE_KEYS):
++        intent, conf = "вопрос_о_товаре", max(conf, 0.6)
++
+     unknown = _unknown_model(text, ents, products)
+     if unknown and intent in ("вопрос_о_товаре", "сравнение", None) or (unknown and conf < intents_mod.CONF_THRESHOLD):
+         return _empty(unknown, intent, conf, ents, clarify=True)
+@@ -168,6 +180,11 @@ def _respond(conn, text, ctx, dialog):
+     return _product_question(conn, text, ctx, ents, intent, conf, by_id)
+ 
+ 
++_THANKS = {"спасибо", "благодарю", "спс", "thanks", "thank you", "спасибо большое"}
++_HELLO = {"hello", "hi", "hey", "хай", "хелло", "салем", "сәлем"}
++_DELIVERY_KEYS = ("достав", "возврат", "вернуть", "самовывоз", "заказ", "посылк", "гарант", "оплат", "курьер")
++_COMPARE_KEYS = ("сравн", "лучше", " или ", "отличается", "отличия", "разниц", " vs ", "против", "что выбрать")
++
+ _BRAND_HINTS = {"iphone": "Apple", "айфон": "Apple", "macbook": "Apple", "airpods": "Apple", "galaxy": "Samsung", "самсунг": "Samsung", "pixel": "Google",
+                 "redmi": "Xiaomi", "poco": "Xiaomi", "сяоми": "Xiaomi", "ксиаоми": "Xiaomi", "эппл": "Apple", "асус": "ASUS", "леново": "Lenovo", "сони": "Sony",
+                 "хуавей": "Huawei", "хонор": "Honor", "делл": "Dell"}
+@@ -305,7 +322,7 @@ def _quotes(conn, product_id, qvec, aspects):
+     return out
+ 
+ 
+-_GENERAL = ("что говорят", "что пишут", "минус", "плюс", "отзыв", "расскажи", "стоит ли", "покупатели", "мнение", "как себя", "в целом", "достоинств", "недостатк", "проблем")
++_GENERAL = ("что говорят", "что пишут", "минус", "плюс", "отзыв", "расскажи", "стоит ли", "покупатели", "мнение", "как себя", "в целом", "достоинств", "недостатк", "проблем", "скажешь", "думаешь", "обзор", "рекомендуешь", "брать", "что за", "расскажите", "как тебе", "что можешь сказать")
+ 
+ 
+ def _product_question(conn, text, ctx, ents, intent, conf, by_id):
+diff --git a/tests/test_all.py b/tests/test_all.py
+index eaf6964..dc3b317 100644
+--- a/tests/test_all.py
++++ b/tests/test_all.py
+@@ -217,6 +217,17 @@ class TestApi(unittest.TestCase):
+         a = self.c.get("/api/seller/analytics", headers=self.login("seller@demo.kz", "seller123")).get_json()
+         self.assertTrue(any(x["aspect"] == "нагрев" for x in a["alerts"]))
+ 
++    def test_chat_understands_everyday_phrasing(self):
++        def ask(m):
++            return self.c.post("/api/chat", json={"message": m}).get_json()
++        self.assertIn("Пожалуйста", ask("спасибо")["reply"])
++        self.assertEqual(ask("hello")["intent"], "приветствие")
++        self.assertIn("HONOR 200", ask("что скажешь про honor 200")["reply"])
++        self.assertNotIn("доставка", ask("сколько держит заряд poco x6 pro")["reply"].lower()[:60])
++        cmp_ = ask("сравни sony wf-1000xm5 и bose qc ultra")
++        self.assertEqual(sorted(p["title"] for p in cmp_["products"]), ["Bose QuietComfort Ultra", "Sony WF-1000XM5"])
++        self.assertIn("Pixel", ask("пиксель камера")["reply"])
++
+     def test_catalog_has_30_products(self):
+         self.assertEqual(len(self.c.get("/api/products").get_json()["items"]), 30)
+ 

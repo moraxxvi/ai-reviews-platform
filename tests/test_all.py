@@ -217,6 +217,17 @@ class TestApi(unittest.TestCase):
         a = self.c.get("/api/seller/analytics", headers=self.login("seller@demo.kz", "seller123")).get_json()
         self.assertTrue(any(x["aspect"] == "нагрев" for x in a["alerts"]))
 
+    def test_chat_understands_everyday_phrasing(self):
+        def ask(m):
+            return self.c.post("/api/chat", json={"message": m}).get_json()
+        self.assertIn("Пожалуйста", ask("спасибо")["reply"])
+        self.assertEqual(ask("hello")["intent"], "приветствие")
+        self.assertIn("HONOR 200", ask("что скажешь про honor 200")["reply"])
+        self.assertNotIn("доставка", ask("сколько держит заряд poco x6 pro")["reply"].lower()[:60])
+        cmp_ = ask("сравни sony wf-1000xm5 и bose qc ultra")
+        self.assertEqual(sorted(p["title"] for p in cmp_["products"]), ["Bose QuietComfort Ultra", "Sony WF-1000XM5"])
+        self.assertIn("Pixel", ask("пиксель камера")["reply"])
+
     def test_catalog_has_30_products(self):
         self.assertEqual(len(self.c.get("/api/products").get_json()["items"]), 30)
 
@@ -287,6 +298,12 @@ class TestRules(unittest.TestCase):
         self.assertEqual(r("не греется вообще"), "positive")
         self.assertEqual(r("батарея не держит заряд"), "negative")
         self.assertIsNone(r("камера отличная"))
+
+    def test_one_word_clause_after_but_is_kept(self):
+        """«камера крутая, но греется»: однословная часть после «но» не должна склеиваться с предыдущей."""
+        from ai.preprocess import split_clauses
+        self.assertEqual(split_clauses("камера крутая, но греется"), ["камера крутая", "греется"])
+        self.assertEqual(split_clauses("батарея держит, очень"), ["батарея держит очень"])
 
 
 if __name__ == "__main__":
