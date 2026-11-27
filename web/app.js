@@ -88,7 +88,19 @@ function artSvg(cat, color) {
 }
 function art(p, big) {
   const [bg, fg] = PALETTES[p.product_id % PALETTES.length];
-  return h("div", { class: "art", style: `background:${bg}`, html: artSvg(p.category, fg) });
+  const box = h("div", { class: "art", style: `background:${bg}`, html: artSvg(p.category, fg) });
+  const img = new Image(); img.alt = p.title; img.className = "photo";
+  img.onload = () => box.replaceChildren(img);       // фото есть: показываем его вместо рисунка
+  img.src = "/static/img/" + p.product_id + ".jpg";  // нет файла: остаётся SVG-заглушка
+  return box;
+}
+/* фото в карточке каталога: показывается только если файл существует */
+function cardPhoto(p) {
+  const box = h("div", { class: "card-photo", hidden: true });
+  const img = new Image(); img.alt = p.title; img.loading = "lazy";
+  img.onload = () => { box.append(img); box.hidden = false; };
+  img.src = "/static/img/" + p.product_id + ".jpg";
+  return box;
 }
 
 /* ---------- карточка товара ---------- */
@@ -106,6 +118,7 @@ function updateCompareBadge() { const b = $("#cmp-count"); b.textContent = compa
 function productCard(p) {
   const inCmp = compareIds.includes(p.product_id);
   return h("article", { class: "card clickable", onclick: e => { if (!e.target.closest("button, a")) location.hash = "#/product/" + p.product_id; } },
+    cardPhoto(p),
     h("div", { style: "display:flex;justify-content:space-between;gap:12px;align-items:baseline" },
       h("h3", { style: "margin:0" }, p.title), h("span", { class: "price" }, fmt(p.price))),
     h("p", { class: "serif", style: "margin:4px 0 2px;font-size:19px;line-height:1.4" }, verdictLine(p.top_aspects, p.weak_aspects)),
