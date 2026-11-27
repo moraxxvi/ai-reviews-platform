@@ -19,6 +19,34 @@ function h(tag, props, ...kids) {
 }
 const fmt = n => Number(n).toLocaleString("ru-RU").replace(/ /g, " ") + " ₸";
 const pct = x => Math.round(x * 100) + "%";
+const norm = t => t.toLowerCase().replace(/ё/g, "е");
+/* текст отзыва с подсветкой фраз, на которых построен AI-анализ (фраза ищется без учёта регистра и «ё») */
+function highlighted(text, aspects) {
+  const nt = norm(text), spans = [];
+  for (const a of aspects || []) {
+    if (!a.clause || a.sentiment === "neutral") continue;
+    const i = nt.indexOf(norm(a.clause));
+    if (i >= 0) spans.push([i, i + a.clause.length, a.sentiment === "positive" ? "p" : "n"]);
+  }
+  spans.sort((x, y) => x[0] - y[0]);
+  const out = []; let pos = 0;
+  for (const [st, en, k] of spans) {
+    if (st < pos) continue;
+    if (st > pos) out.push(text.slice(pos, st));
+    out.push(h("mark", { class: k }, text.slice(st, en))); pos = en;
+  }
+  if (pos < text.length) out.push(text.slice(pos));
+  return out;
+}
+const joinRu = a => a.length < 2 ? a.join("") : a.slice(0, -1).join(", ") + " и " + a[a.length - 1];
+function verdictLine(good, bad) {
+  const g = (good || []).map(x => h("mark", { class: "p" }, x)), b = (bad || []).map(x => h("mark", { class: "n" }, x));
+  const j = (arr) => arr.flatMap((m, i) => i === 0 ? [m] : [i === arr.length - 1 ? " и " : ", ", m]);
+  if (g.length && b.length) return ["Хвалят ", ...j(g), ", ругают ", ...j(b), "."];
+  if (g.length) return ["Хвалят ", ...j(g), "."];
+  if (b.length) return ["Ругают ", ...j(b), "."];
+  return ["Пока мало отзывов для вывода."];
+}
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
@@ -52,11 +80,11 @@ function failure(e) {
 }
 
 /* ---------- иллюстрации товаров (SVG, без внешних файлов) ---------- */
-const PALETTES = [["#e9e5ff", "#6c5ce7"], ["#e3f0ff", "#3b82f6"], ["#e1f6ee", "#1f9d6b"], ["#ffeede", "#e8833a"], ["#f1e6fa", "#a24fd1"], ["#e6edf5", "#51657d"]];
+const PALETTES = [["#eef2f1", "#cfd8d6"], ["#eef2f1", "#c3d0cd"], ["#eef2f1", "#d6dedc"], ["#eef2f1", "#bccac7"], ["#eef2f1", "#cad6d3"], ["#eef2f1", "#d0dad7"]];
 function artSvg(cat, color) {
-  if (cat === "ноутбуки") return `<svg viewBox="0 0 160 110"><rect x="26" y="10" width="108" height="72" rx="7" fill="#1b2142"/><rect x="31" y="15" width="98" height="62" rx="3" fill="${color}"/><path d="M8 88h144l-10 12H18z" fill="#2b335c"/></svg>`;
-  if (cat === "наушники") return `<svg viewBox="0 0 120 120"><path d="M20 70V60a40 40 0 0 1 80 0v10" fill="none" stroke="#1b2142" stroke-width="9" stroke-linecap="round"/><rect x="12" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#1b2142" stroke-width="5"/><rect x="84" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#1b2142" stroke-width="5"/></svg>`;
-  return `<svg viewBox="0 0 70 130"><rect x="4" y="4" width="62" height="122" rx="14" fill="#1b2142"/><rect x="9" y="12" width="52" height="106" rx="8" fill="${color}"/><rect x="27" y="7" width="16" height="4" rx="2" fill="#0d1130"/></svg>`;
+  if (cat === "ноутбуки") return `<svg viewBox="0 0 160 110"><rect x="26" y="10" width="108" height="72" rx="7" fill="#0b1f1d"/><rect x="31" y="15" width="98" height="62" rx="3" fill="${color}"/><path d="M8 88h144l-10 12H18z" fill="#2a4743"/></svg>`;
+  if (cat === "наушники") return `<svg viewBox="0 0 120 120"><path d="M20 70V60a40 40 0 0 1 80 0v10" fill="none" stroke="#0b1f1d" stroke-width="9" stroke-linecap="round"/><rect x="12" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#0b1f1d" stroke-width="5"/><rect x="84" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#0b1f1d" stroke-width="5"/></svg>`;
+  return `<svg viewBox="0 0 70 130"><rect x="4" y="4" width="62" height="122" rx="14" fill="#0b1f1d"/><rect x="9" y="12" width="52" height="106" rx="8" fill="${color}"/><rect x="27" y="7" width="16" height="4" rx="2" fill="#0b1f1d"/></svg>`;
 }
 function art(p, big) {
   const [bg, fg] = PALETTES[p.product_id % PALETTES.length];
@@ -77,16 +105,18 @@ function updateCompareBadge() { const b = $("#cmp-count"); b.textContent = compa
 
 function productCard(p) {
   const inCmp = compareIds.includes(p.product_id);
-  const art_ = art(p); art_.append(h("span", { class: "badge" }, "✦ " + (p.ai_badge || "AI-анализ")));
   return h("article", { class: "card clickable", onclick: e => { if (!e.target.closest("button, a")) location.hash = "#/product/" + p.product_id; } },
-    art_,
-    h("h3", {}, p.title),
-    h("div", { class: "rate" }, h("span", { class: "star" }, "★ "), (p.rating != null ? Number(p.rating).toFixed(1) : "—"), " · ", p.n_reviews, " отзывов"),
-    h("div", { class: "aspects" }, (p.top_aspects || []).map(a => h("span", { class: "tag good" }, "👍 " + a))),
-    h("div", { class: "price" }, fmt(p.price)),
+    h("div", { style: "display:flex;justify-content:space-between;gap:12px;align-items:baseline" },
+      h("h3", { style: "margin:0" }, p.title), h("span", { class: "price" }, fmt(p.price))),
+    h("p", { class: "serif", style: "margin:4px 0 2px;font-size:19px;line-height:1.4" }, verdictLine(p.top_aspects, p.weak_aspects)),
+    h("div", { style: "display:flex;flex-direction:column;gap:7px;margin:8px 0" }, (p.aspect_bars || []).map(a =>
+      h("div", { class: "bar-mini" }, h("span", {}, cap(a.aspect)),
+        h("span", { class: "bar", role: "img", "aria-label": `${a.aspect}: ${pct(a.pos_share)} положительных`, style: "height:5px" }, h("i", { style: `width:${pct(a.pos_share)};background:${a.pos_share < 0.6 ? "#d8574a" : "#3aa76d"}` })),
+        h("b", {}, pct(a.pos_share))))),
+    h("div", { class: "rate" }, (p.rating != null ? "★ " + Number(p.rating).toFixed(1) + " · " : ""), p.n_reviews, " отзывов"),
     h("div", { class: "btns" },
-      h("a", { class: "btn", href: "#/product/" + p.product_id }, "Подробнее →"),
-      h("button", { class: "btn", type: "button", "aria-pressed": inCmp, onclick: () => toggleCompare(p.product_id) }, inCmp ? "✓ В сравнении" : "Сравнить")));
+      h("a", { class: "btn", href: "#/product/" + p.product_id }, "Подробнее"),
+      h("button", { class: "btn", type: "button", "aria-pressed": inCmp, onclick: () => toggleCompare(p.product_id) }, inCmp ? "В сравнении" : "Сравнить")));
 }
 
 /* ---------- страницы ---------- */
@@ -105,7 +135,7 @@ function tryReviewPanel() {
         h("small", { class: "muted" }, "Общая тональность: " + SENT_RU[r.overall] + " · модель: " + r.model));
     } catch (e) { box.replaceChildren(h("p", { class: "muted" }, e.message)); }
   };
-  return h("section", { class: "panel ai try" }, h("h3", {}, "✦ Проверьте, как ИИ читает отзыв"),
+  return h("section", { class: "panel try" }, h("h3", {}, "Проверьте, как ИИ читает отзыв"),
     h("p", { class: "hint" }, "Напишите отзыв своими словами: ИИ разобьёт его на части, найдёт аспекты и определит тональность каждой."),
     ta, h("button", { class: "btn primary", onclick: run }, "Разобрать отзыв"), box);
 }
@@ -116,22 +146,23 @@ async function pageHome() {
     const data = await api("/api/products?sort=rating");
     const cats = [["смартфоны", "Смартфоны", "смартфоны"], ["ноутбуки", "Ноутбуки", "ноутбуки"], ["наушники", "Наушники", "наушники"]];
     view.replaceChildren(
-      h("section", { class: "hero" },
-        h("div", {},
-          h("div", { class: "eyebrow", style: "color:#b5abff" }, "AI Market · платформа анализа отзывов"),
-          h("h1", {}, "ИИ превращает отзывы в ", h("span", { class: "ai-word" }, "решения")),
-          h("p", {}, "Покупатель получает готовый разбор товара по аспектам с цитатами из отзывов. Продавец видит, на что жалуются клиенты, и замечает проблему раньше, чем упадёт рейтинг."),
-          h("div", { class: "btns" },
-            h("a", { class: "btn primary", href: "#/catalog" }, "Я покупатель"),
-            h("button", { class: "btn", type: "button", onclick: sellerEntry }, "Я продавец"),
-            h("button", { class: "btn", type: "button", onclick: () => openChat() }, "✦ Спросить AI"))),
-        h("div", { class: "hero-art" }, ["смартфоны", "ноутбуки", "наушники"].map((c, i) => h("div", { html: artSvg(c, PALETTES[i][1]), style: "width:100px" })))),
+      h("section", { class: "hero intro" },
+        h("div", { class: "eyebrow" }, "Платформа анализа отзывов"),
+        h("h1", {}, "Выбирайте по тому, что пишут покупатели"),
+        h("p", {}, "Спросите словами или выберите категорию. ИИ разберёт отзывы и покажет, что хвалят и за что ругают."),
+        h("form", { class: "ask", onsubmit: e => { e.preventDefault(); const v = e.target.q.value.trim(); if (v) openChat(v); } },
+          h("input", { name: "q", maxlength: 300, placeholder: "Например: смартфон до 300 000 ₸ с хорошей камерой", "aria-label": "Вопрос AI-консультанту" }),
+          h("button", { class: "btn primary", type: "submit" }, "Спросить AI")),
+        h("div", { class: "ask-chips" }, ["Как батарея у iPhone 15", "Сравни iPhone 15 и Galaxy S24 FE", "Сколько стоит доставка"].map(t => h("button", { type: "button", onclick: () => openChat(t) }, t))),
+        h("div", { class: "btns" },
+          h("a", { class: "btn", href: "#/catalog" }, "Каталог"),
+          h("button", { class: "btn", type: "button", onclick: sellerEntry }, "Я продавец"))),
       tryReviewPanel(),
-      h("h2", {}, "Популярные категории"),
+      h("h2", {}, "Категории"),
       h("div", { class: "tiles" }, cats.map(([key, name], i) =>
-        h("a", { class: "tile", href: "#/catalog?category=" + encodeURIComponent(key) }, h("div", { html: artSvg(key, PALETTES[i][1]), style: "width:54px" }), h("div", {}, h("b", {}, name), h("span", { class: "muted" }, "с AI-анализом отзывов"))))),
-      h("h2", {}, "✦ Рекомендации AI"),
-      h("p", { class: "muted", style: "margin-top:-8px" }, "Лучшие по оценке покупателей среди проанализированных отзывов"),
+        h("a", { class: "tile", href: "#/catalog?category=" + encodeURIComponent(key) }, h("div", { html: artSvg(key, PALETTES[i][1]), style: "width:54px" }), h("div", {}, h("b", {}, name), h("span", { class: "muted" }, "разбор отзывов по аспектам"))))),
+      h("h2", {}, "Лучшие по отзывам"),
+      h("p", { class: "muted", style: "margin-top:-8px" }, "Товары с самой высокой оценкой среди проанализированных отзывов"),
       h("div", { class: "grid" }, data.items.slice(0, 4).map(productCard)));
   } catch (e) { failure(e); }
 }
@@ -164,9 +195,9 @@ async function pageCatalog(q) {
       [["popular", "По популярности"], ["rating", "По рейтингу"], ["price_asc", "Сначала дешевле"], ["price_desc", "Сначала дороже"]].map(([v, t]) => h("option", { value: v, selected: f.sort === v }, t)));
     view.replaceChildren(
       h("div", { class: "crumbs" }, h("a", { href: "#/" }, "Главная"), " / Каталог"),
-      h("div", { class: "toolbar" }, h("div", {}, h("div", { class: "eyebrow" }, "Каталог"), h("h1", { style: "margin:0" }, f.q ? `Поиск: «${f.q}»` : "Техника, которой доверяют"),
+      h("div", { class: "toolbar" }, h("div", {}, h("div", { class: "eyebrow" }, "Каталог"), h("h1", { style: "margin:0" }, f.q ? `Поиск: «${f.q}»` : "Выбирайте по отзывам"),
         h("span", { class: "muted" }, `${data.total} товаров с AI-анализом отзывов`)),
-        h("button", { class: "btn", type: "button", onclick: () => openChat("Помоги подобрать " + (f.category || "товар")) }, "✦ Подобрать с AI")),
+        h("button", { class: "btn primary", type: "button", onclick: () => openChat("Помоги подобрать " + (f.category || "товар")) }, "Подобрать с AI")),
       h("div", { class: "layout" }, filters, h("div", {}, h("div", { class: "toolbar" }, h("span", {}), sel),
         data.items.length ? h("div", { class: "grid" }, data.items.map(productCard)) : h("div", { class: "empty" }, "Ничего не найдено. Измените фильтры или спросите AI-консультанта."))));
   } catch (e) { failure(e); }
@@ -174,7 +205,7 @@ async function pageCatalog(q) {
 
 function barRow(a) {
   return h("div", { class: "bar-row" }, h("span", {}, a.aspect[0].toUpperCase() + a.aspect.slice(1)),
-    h("div", { class: "bar", role: "img", "aria-label": `${a.aspect}: ${pct(a.pos_share)} положительных` }, h("i", { style: `width:${pct(a.pos_share)}` })),
+    h("div", { class: "bar", role: "img", "aria-label": `${a.aspect}: ${pct(a.pos_share)} положительных` }, h("i", { style: `width:${pct(a.pos_share)};background:${a.pos_share < 0.6 ? "#d8574a" : "#3aa76d"}` })),
     h("small", {}, `${pct(a.pos_share)} · ${Math.round(a.n_mentions)} упом.`));
 }
 
@@ -209,27 +240,27 @@ async function pageProduct(id) {
           h("dl", { class: "specs" }, Object.entries(p.specs).flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
           h("div", { class: "btns" },
             h("button", { class: "btn primary", type: "button", onclick: () => toast("Демо: корзина не реализована") }, "В корзину"),
-            h("button", { class: "btn", type: "button", onclick: () => toggleCompare(p.product_id) }, inCmp ? "✓ В сравнении" : "Сравнить"),
-            h("button", { class: "btn", type: "button", onclick: () => openChat("Что покупатели говорят про " + p.title) }, "✦ Спросить AI")))),
+            h("button", { class: "btn", type: "button", onclick: () => toggleCompare(p.product_id) }, inCmp ? "В сравнении" : "Сравнить"),
+            h("button", { class: "btn", type: "button", onclick: () => openChat("Что покупатели говорят про " + p.title) }, "Спросить AI")))),
       h("section", { class: "panel ai" },
-        h("div", { class: "eyebrow" }, "✦ Что говорят покупатели"),
+        h("div", { class: "eyebrow" }, `Вывод по ${p.n_analyzed} отзывам`),
+        h("p", { class: "verdict" }, verdictLine(p.strengths.slice(0, 2), p.weaknesses.slice(0, 2))),
         h("div", { style: "display:flex;gap:30px;flex-wrap:wrap;align-items:center;margin:10px 0 18px" },
           h("div", {}, h("div", { class: "big" }, p.sentiment.positive + "%"), h("span", { class: "muted" }, "положительных отзывов")),
           h("div", { style: "flex:1;min-width:240px" },
             h("div", { class: "stack", role: "img", "aria-label": `Тональность: ${p.sentiment.positive}% положительных, ${p.sentiment.neutral}% нейтральных, ${p.sentiment.negative}% отрицательных` },
-              h("i", { style: `width:${p.sentiment.positive}%;background:var(--good)` }), h("i", { style: `width:${p.sentiment.neutral}%;background:#b9bfd8` }), h("i", { style: `width:${p.sentiment.negative}%;background:var(--bad)` })),
-            h("div", { class: "legend" }, h("span", {}, h("b", { style: "background:var(--good)" }), "положительные " + p.sentiment.positive + "%"), h("span", {}, h("b", { style: "background:#b9bfd8" }), "нейтральные " + p.sentiment.neutral + "%"), h("span", {}, h("b", { style: "background:var(--bad)" }), "отрицательные " + p.sentiment.negative + "%")))),
+              h("i", { style: `width:${p.sentiment.positive}%;background:var(--good)` }), h("i", { style: `width:${p.sentiment.neutral}%;background:var(--neutral)` }), h("i", { style: `width:${p.sentiment.negative}%;background:var(--bad)` })),
+            h("div", { class: "legend" }, h("span", {}, h("b", { style: "background:var(--good)" }), "положительные " + p.sentiment.positive + "%"), h("span", {}, h("b", { style: "background:var(--neutral)" }), "нейтральные " + p.sentiment.neutral + "%"), h("span", {}, h("b", { style: "background:var(--bad)" }), "отрицательные " + p.sentiment.negative + "%")))),
         h("h3", {}, "Оценка по аспектам"), shown.length ? shown.map(barRow) : h("p", { class: "muted" }, "Недостаточно упоминаний для оценки по аспектам."),
-        h("p", {}, h("b", {}, "AI-вывод: "), p.conclusion),
+        h("p", { class: "muted" }, p.conclusion),
         h("div", { class: "two lists" },
           h("div", {}, h("h3", {}, "Покупатели чаще всего отмечают"), p.strengths.length ? h("ul", {}, p.strengths.map(s => h("li", {}, s))) : h("span", { class: "muted" }, "—")),
           h("div", {}, h("h3", {}, "На что жалуются покупатели"), p.weaknesses.length ? h("ul", {}, p.weaknesses.map(s => h("li", {}, s))) : h("span", { class: "muted" }, "Явных проблем не выявлено"))),
         h("p", { class: "hint" }, `Проанализировано отзывов: ${p.n_analyzed}. Исключено как подозрительные: ${p.n_excluded_suspicious}. Модель тональности: ${p.model}.`)),
       h("section", { class: "panel", id: "reviews" }, h("h3", {}, "Отзывы, учтённые в AI-анализе"),
         rv.items.map(r => h("div", { class: "review", id: "review-" + r.review_id },
-          h("div", { class: "meta" }, h("span", { class: "star", style: "color:#f5a623" }, "★".repeat(r.rating)), h("span", {}, r.date.slice(0, 10)), r.is_verified ? h("span", {}, "✓ покупка подтверждена") : h("span", {}, "покупка не подтверждена"), h("span", { class: "counted" }, "✦ Учтено в AI-анализе"), h("span", {}, "#" + r.review_id)),
-          h("div", {}, r.text),
-          h("div", { class: "aspects", style: "margin-top:6px" }, r.aspects.map(a => h("span", { class: "tag " + (a.sentiment === "positive" ? "good" : "bad") }, a.aspect)))))),
+          h("div", { class: "meta" }, h("span", { class: "star", style: "color:#c98a12" }, "★".repeat(r.rating)), h("span", {}, r.date.slice(0, 10)), r.is_verified ? h("span", {}, "покупка подтверждена") : h("span", {}, "покупка не подтверждена"), h("span", { class: "counted" }, "учтён в AI-анализе"), h("span", {}, "#" + r.review_id)),
+          h("div", { class: "txt" }, highlighted(r.text, r.aspects))))),
       reviewForm);
     if (location.hash.includes("review=")) { const rid = location.hash.split("review=")[1]; setTimeout(() => $("#review-" + rid)?.scrollIntoView({ block: "center" }), 50); }
   } catch (e) { failure(e); }
@@ -247,7 +278,7 @@ async function pageCompare() {
     const rows = [
       h("tr", {}, h("th", {}, "Цена"), c.products.map(p => h("td", {}, fmt(p.price)))),
       h("tr", {}, h("th", {}, "Рейтинг"), c.products.map(p => h("td", {}, "★ " + (p.rating != null ? Number(p.rating).toFixed(1) : "—") + " · " + p.n_reviews + " отзывов"))),
-      ...c.aspects.map(r => h("tr", {}, h("th", {}, r.aspect[0].toUpperCase() + r.aspect.slice(1), h("span", { class: "ai-mark" }, "✦ AI-анализ отзывов")),
+      ...c.aspects.map(r => h("tr", {}, h("th", {}, r.aspect[0].toUpperCase() + r.aspect.slice(1), ),
         c.products.map(p => { const v = r.values[String(p.product_id)]; return h("td", { class: r.best === p.product_id ? "best" : "" }, v ? pct(v.pos_share) + " положительных" : "мало данных"); }))),
       h("tr", {}, h("th", {}, "Плюсы"), c.products.map(p => h("td", {}, p.strengths.join(", ") || "—"))),
       h("tr", {}, h("th", {}, "Минусы"), c.products.map(p => h("td", {}, p.weaknesses.join(", ") || "—"))),
@@ -260,12 +291,20 @@ async function pageCompare() {
 
 function lineChart(points) {
   if (!points.length) return h("p", { class: "muted" }, "Нет данных");
-  const W = 640, H = 200, P = 30, n = points.length;
-  const x = i => P + (n === 1 ? (W - 2 * P) / 2 : i * (W - 2 * P) / (n - 1)), y = v => H - P - (v / 100) * (H - 2 * P);
+  const W = 640, H = 220, L = 44, R = 16, T = 16, B = 34, n = points.length;
+  const x = i => L + (n === 1 ? (W - L - R) / 2 : i * (W - L - R) / (n - 1)), y = v => T + (1 - v / 100) * (H - T - B);
   const d = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(p.positive_pct).toFixed(1)}`).join(" ");
-  const grid = [0, 50, 100].map(v => `<line x1="${P}" x2="${W - P}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="4" y="${y(v) + 4}" font-size="11" fill="var(--muted)">${v}%</text>`).join("");
-  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.positive_pct)}" r="4" fill="var(--ai)"/><text x="${x(i)}" y="${H - 8}" font-size="11" text-anchor="middle" fill="var(--muted)">${p.month.slice(5)}.${p.month.slice(2, 4)}</text>`).join("");
-  return h("div", { class: "chart", role: "img", "aria-label": "Динамика доли положительных отзывов по месяцам", html: `<svg viewBox="0 0 ${W} ${H}">${grid}<path d="${d}" fill="none" stroke="var(--ai)" stroke-width="3"/>${dots}</svg>` });
+  const avg = points.reduce((t, p) => t + p.positive_pct, 0) / n;
+  const grid = [0, 25, 50, 75, 100].map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${L - 8}" y="${y(v) + 4}" font-size="11" text-anchor="end" fill="var(--muted)" font-family="Geist Mono,monospace">${v}%</text>`).join("");
+  const step = Math.ceil(n / 8);
+  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.positive_pct)}" r="${i === n - 1 ? 5 : 3.5}" fill="var(--ai)"><title>${p.month}: ${Math.round(p.positive_pct)}%</title></circle>` +
+    (i % step === 0 || i === n - 1 ? `<text x="${x(i)}" y="${H - 12}" font-size="11" text-anchor="middle" fill="var(--muted)" font-family="Geist Mono,monospace">${p.month.slice(5)}.${p.month.slice(2, 4)}</text>` : "")).join("");
+  const last = points[n - 1];
+  const avgLine = `<line x1="${L}" x2="${W - R}" y1="${y(avg)}" y2="${y(avg)}" stroke="var(--muted)" stroke-dasharray="5 4"/><text x="${L + 6}" y="${y(avg) + 16}" font-size="11" fill="var(--muted)">в среднем ${Math.round(avg)}%</text>`;
+  const lab = `<text x="${x(n - 1)}" y="${y(last.positive_pct) - 10}" font-size="12" font-weight="600" text-anchor="end" fill="var(--ai-ink)" font-family="Geist Mono,monospace">${Math.round(last.positive_pct)}%</text>`;
+  return h("div", { class: "chart", role: "img", "aria-label": `Динамика доли положительных отзывов по месяцам, в последнем месяце ${Math.round(last.positive_pct)}%`,
+    html: `<svg viewBox="0 0 ${W} ${H}">${grid}${avgLine}<path d="${d}" fill="none" stroke="var(--ai)" stroke-width="2.5" stroke-linejoin="round"/>${dots}${lab}</svg>` },
+  );
 }
 
 /* ---------- кабинет продавца: разделы #/seller, /seller/products, /seller/reviews, /seller/analytics, /seller/settings ---------- */
@@ -288,16 +327,16 @@ function kpis(a) {
     h("div", { class: "kpi" }, h("b", { style: "color:var(--bad)" }, a.distribution.negative + "%"), "отрицательных"));
 }
 function alertBox(al) {
-  return h("div", { class: "alert", role: "alert" }, "⚠ " + al.message,
-    h("a", { href: "#/seller/reviews?" + qs({ product_id: al.product_id, aspect: al.aspect, aspect_sentiment: "negative", days: 30 }) }, "Посмотреть отзывы"));
+  return h("div", { class: "alert", role: "alert" }, h("span", { class: "tag-a" }, "АЛЕРТ"), h("div", { class: "msg-a" }, al.message),
+    h("a", { href: "#/seller/reviews?" + qs({ product_id: al.product_id, aspect: al.aspect, aspect_sentiment: "negative", days: 30 }) }, "Смотреть отзывы"));
 }
 function aspectRows(list, pid) {
   return list.map(t => {
     const tot = t.mentions || 1;
     return h("div", { class: "bar-row" },
       h("a", { href: "#/seller/reviews?" + qs({ product_id: pid, aspect: t.aspect }), title: "Показать отзывы с этим аспектом" }, cap(t.aspect)),
-      h("div", { class: "bar" }, h("i", { style: `width:${Math.round(t.positive / tot * 100)}%` })),
-      h("small", {}, `${t.positive}👍 ${t.negative}👎`));
+      h("div", { class: "bar" }, h("i", { style: `width:${Math.round(t.positive / tot * 100)}%;background:${t.positive / tot < 0.6 ? "#d8574a" : "#3aa76d"}` })),
+      h("small", {}, `${t.positive} плюс · ${t.negative} минус`));
   });
 }
 
@@ -314,12 +353,12 @@ async function pageSeller(sub = "", q = {}) {
       const { products } = await api("/api/seller/products");
       view.replaceChildren(sellerShell("products", h("h1", {}, "Мои товары"),
         h("section", { class: "panel" }, h("div", { class: "tbl-wrap" }, h("table", { class: "cmp" },
-          h("thead", {}, h("tr", {}, ["Товар", "Цена", "Отзывов", "Оценка", "👍", "👎", "Фейки", "Сигналы", ""].map(t => h("th", {}, t)))),
+          h("thead", {}, h("tr", {}, ["Товар", "Цена", "Отзывов", "Оценка", "Плюс", "Минус", "Подозр.", "Сигналы", ""].map(t => h("th", {}, t)))),
           h("tbody", {}, products.map(p => h("tr", {},
             h("td", {}, h("b", {}, p.title), h("br"), h("small", { class: "muted" }, cap(p.category) + " · " + p.brand)),
             h("td", {}, fmt(p.price)), h("td", {}, p.n_reviews), h("td", {}, p.rating ?? "—"),
             h("td", {}, p.positive_pct + "%"), h("td", {}, p.negative_pct + "%"), h("td", {}, p.suspicious),
-            h("td", {}, p.alerts ? h("span", { class: "tag bad" }, "⚠ " + p.alerts) : h("span", { class: "muted" }, "—")),
+            h("td", {}, p.alerts ? h("span", { class: "tag bad" }, "алертов: " + p.alerts) : h("span", { class: "muted" }, "—")),
             h("td", {}, h("div", { class: "acts" },
               h("a", { href: "#/seller/reviews?product_id=" + p.product_id }, "Отзывы"),
               h("a", { href: "#/seller/analytics?product_id=" + p.product_id }, "Аналитика"),
@@ -356,7 +395,7 @@ async function pageSeller(sub = "", q = {}) {
             r.overall ? h("span", { class: "tag " + (r.overall === "positive" ? "good" : r.overall === "negative" ? "bad" : "") }, SENT_RU[r.overall]) : null,
             r.suspicious ? h("span", { class: "tag bad" }, "подозрительный " + Math.round(r.fake_score * 100) + "%") : null,
             r.is_verified ? null : h("small", { class: "muted" }, "покупка не подтверждена")),
-          h("p", {}, r.text),
+          h("p", { class: "txt" }, highlighted(r.text, r.aspects)),
           h("div", { class: "rv-asp" }, r.aspects.map(a => h("span", { class: "tag " + (a.sentiment === "positive" ? "good" : a.sentiment === "negative" ? "bad" : "") }, a.aspect))))) :
           h("div", { class: "empty" }, h("p", {}, "По выбранным фильтрам отзывов нет."))));
       return;
@@ -365,13 +404,17 @@ async function pageSeller(sub = "", q = {}) {
     const [a, { products }] = await Promise.all([
       api("/api/seller/analytics?" + qs({ product_id: pid, sensitivity: pr.sensitivity, days: pr.days })),
       sub === "analytics" ? api("/api/seller/products") : Promise.resolve({ products: [] })]);
-    const parts = [h("h1", {}, sub === "analytics" ? "✦ AI-аналитика отзывов" : "Обзор")];
+    const parts = [h("h1", {}, sub === "analytics" ? "AI-аналитика отзывов" : "Обзор")];
     if (sub === "analytics") parts.push(h("div", { class: "toolbar" },
       h("select", { onchange: e => { location.hash = "#/seller/analytics?" + qs({ product_id: e.target.value }); } }, h("option", { value: "" }, "Все товары"),
         products.map(p => h("option", { value: p.product_id, selected: String(p.product_id) === String(pid) }, p.title))),
       h("small", { class: "muted" }, `Период: ${pr.days ? pr.days + " дн." : "всё время"} · чувствительность: ${{ low: "низкая", normal: "обычная", high: "высокая" }[pr.sensitivity]} (меняется в «Настройках»)`)));
+    if (sub !== "analytics") parts.push(h("p", { class: "lead" }, a.alerts.length
+      ? ["Есть тревожный сигнал: ", h("mark", { class: "n" }, a.alerts[0].aspect), ". Остальное без резких изменений."]
+      : ["Резких изменений в жалобах нет. Положительных отзывов ", h("mark", { class: "p" }, a.distribution.positive + "%"), "."]));
     parts.push(a.alerts.length ? a.alerts.map(alertBox) : h("p", { class: "hint" }, "Резких изменений в жалобах не обнаружено."), kpis(a),
-      h("section", { class: "panel" }, h("h3", {}, "Динамика тональности"), lineChart(a.dynamics),
+      h("section", { class: "panel" }, h("h3", {}, "Доля положительных отзывов по месяцам"), lineChart(a.dynamics),
+        h("div", { class: "chart-legend" }, h("span", {}, h("i"), "доля положительных, %"), h("span", {}, "пунктир: среднее за период")),
         h("p", { class: "hint" }, "Доля положительных отзывов по месяцам. Исключено подозрительных отзывов: " + a.suspicious_excluded +
           (a.suspicious_excluded ? " — " : ""), a.suspicious_excluded ? h("a", { href: "#/seller/reviews?" + qs({ product_id: pid, suspicious: "1" }) }, "показать") : null)));
     const asp = h("section", { class: "panel" }, h("h3", {}, "Основные аспекты"));
@@ -446,14 +489,14 @@ function addMsg(role, text, extra = {}) {
 function openReview(pid, rid) { if (!pid) return; location.hash = `#/product/${pid}?review=${rid}`; if (location.hash.includes("product")) route(); }
 function openChat(prefill) {
   chat.hidden = false; $("#chat-fab").hidden = true;
-  if (!log.children.length) addMsg("bot", "Здравствуйте! Я помогу выбрать товар по отзывам покупателей. Спросите про модель, попросите подобрать или сравнить.");
+  if (!log.children.length) addMsg("bot", "Здравствуйте! Я отвечаю по отзывам покупателей и показываю цитаты. Спросите про модель, попросите подобрать или сравнить.");
   renderChips(); $("#chat-input").focus();
   if (typeof prefill === "string") send(prefill);
 }
 async function send(text) {
   text = (text ?? $("#chat-input").value).trim(); if (!text) return;
   $("#chat-input").value = ""; addMsg("user", text);
-  const wait = addMsg("bot typing", "Анализирую отзывы…");
+  const wait = addMsg("bot typing", "Читаю отзывы…");
   try {
     const r = await api("/api/chat", { method: "POST", body: { message: text, dialog_id: dialogId } });
     dialogId = r.dialog_id; wait.remove();

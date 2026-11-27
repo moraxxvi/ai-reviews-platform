@@ -94,6 +94,9 @@ def list_products(conn, q):
         pr = prof.get(p["product_id"], {})
         good = [(a, v["pos_share"]) for a, v in pr.items() if v["n_mentions"] >= MIN_SHOW and a != "доставка"]
         p["top_aspects"] = [a for a, _ in sorted(good, key=lambda x: -x[1])[:2]]
+        bad = [(a, v["pos_share"]) for a, v in pr.items() if v["n_mentions"] >= MIN_SHOW and a != "доставка" and v["pos_share"] < 0.6]
+        p["weak_aspects"] = [a for a, _ in sorted(bad, key=lambda x: x[1])[:1]]
+        p["aspect_bars"] = [{"aspect": a, "pos_share": v["pos_share"]} for a, v in sorted(pr.items(), key=lambda kv: -kv[1]["n_mentions"]) if v["n_mentions"] >= MIN_SHOW and a != "доставка"][:3]
         p["ai_badge"] = "AI-анализ"
     text = (q.get("q") or "").strip()
     if text:
@@ -180,7 +183,7 @@ def product_reviews(conn, product_id, limit=20):
     revs = db.rows(conn, f"""SELECT r.review_id, r.rating, r.text, r.date, r.is_verified, r.overall, r.fake_score FROM reviews r
                               WHERE r.product_id = ? AND {valid_reviews_clause()} ORDER BY r.date DESC LIMIT ?""", (product_id, limit))
     for r in revs:
-        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment FROM review_aspects WHERE review_id = ?", (r["review_id"],))
+        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment, clause FROM review_aspects WHERE review_id = ?", (r["review_id"],))
         r["counted_in_ai"] = True
     return {"items": revs}
 
@@ -265,7 +268,7 @@ def seller_reviews(conn, user, params):
     rows = db.rows(conn, f"""SELECT r.review_id, r.product_id, p.title, r.rating, r.text, r.date, r.overall, r.fake_score, r.is_verified
                              FROM reviews r JOIN products p USING(product_id) WHERE {where} ORDER BY r.date DESC LIMIT ?""", tuple(prm) + (limit,))
     for r in rows:
-        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment FROM review_aspects WHERE review_id = ?", (r["review_id"],))
+        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment, clause FROM review_aspects WHERE review_id = ?", (r["review_id"],))
         r["suspicious"] = (r["fake_score"] or 0) >= EXCLUDE_ABOVE
     return {"total": total, "reviews": rows}
 

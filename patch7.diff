@@ -1,0 +1,735 @@
+diff --git a/app/catalog.py b/app/catalog.py
+index 14c73e6..48313b7 100644
+--- a/app/catalog.py
++++ b/app/catalog.py
+@@ -94,6 +94,9 @@ def list_products(conn, q):
+         pr = prof.get(p["product_id"], {})
+         good = [(a, v["pos_share"]) for a, v in pr.items() if v["n_mentions"] >= MIN_SHOW and a != "доставка"]
+         p["top_aspects"] = [a for a, _ in sorted(good, key=lambda x: -x[1])[:2]]
++        bad = [(a, v["pos_share"]) for a, v in pr.items() if v["n_mentions"] >= MIN_SHOW and a != "доставка" and v["pos_share"] < 0.6]
++        p["weak_aspects"] = [a for a, _ in sorted(bad, key=lambda x: x[1])[:1]]
++        p["aspect_bars"] = [{"aspect": a, "pos_share": v["pos_share"]} for a, v in sorted(pr.items(), key=lambda kv: -kv[1]["n_mentions"]) if v["n_mentions"] >= MIN_SHOW and a != "доставка"][:3]
+         p["ai_badge"] = "AI-анализ"
+     text = (q.get("q") or "").strip()
+     if text:
+@@ -180,7 +183,7 @@ def product_reviews(conn, product_id, limit=20):
+     revs = db.rows(conn, f"""SELECT r.review_id, r.rating, r.text, r.date, r.is_verified, r.overall, r.fake_score FROM reviews r
+                               WHERE r.product_id = ? AND {valid_reviews_clause()} ORDER BY r.date DESC LIMIT ?""", (product_id, limit))
+     for r in revs:
+-        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment FROM review_aspects WHERE review_id = ?", (r["review_id"],))
++        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment, clause FROM review_aspects WHERE review_id = ?", (r["review_id"],))
+         r["counted_in_ai"] = True
+     return {"items": revs}
+ 
+@@ -265,7 +268,7 @@ def seller_reviews(conn, user, params):
+     rows = db.rows(conn, f"""SELECT r.review_id, r.product_id, p.title, r.rating, r.text, r.date, r.overall, r.fake_score, r.is_verified
+                              FROM reviews r JOIN products p USING(product_id) WHERE {where} ORDER BY r.date DESC LIMIT ?""", tuple(prm) + (limit,))
+     for r in rows:
+-        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment FROM review_aspects WHERE review_id = ?", (r["review_id"],))
++        r["aspects"] = db.rows(conn, "SELECT aspect, sentiment, clause FROM review_aspects WHERE review_id = ?", (r["review_id"],))
+         r["suspicious"] = (r["fake_score"] or 0) >= EXCLUDE_ABOVE
+     return {"total": total, "reviews": rows}
+ 
+diff --git a/web/app.js b/web/app.js
+index 0be6331..92c904f 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -19,6 +19,34 @@ function h(tag, props, ...kids) {
+ }
+ const fmt = n => Number(n).toLocaleString("ru-RU").replace(/ /g, " ") + " ₸";
+ const pct = x => Math.round(x * 100) + "%";
++const norm = t => t.toLowerCase().replace(/ё/g, "е");
++/* текст отзыва с подсветкой фраз, на которых построен AI-анализ (фраза ищется без учёта регистра и «ё») */
++function highlighted(text, aspects) {
++  const nt = norm(text), spans = [];
++  for (const a of aspects || []) {
++    if (!a.clause || a.sentiment === "neutral") continue;
++    const i = nt.indexOf(norm(a.clause));
++    if (i >= 0) spans.push([i, i + a.clause.length, a.sentiment === "positive" ? "p" : "n"]);
++  }
++  spans.sort((x, y) => x[0] - y[0]);
++  const out = []; let pos = 0;
++  for (const [st, en, k] of spans) {
++    if (st < pos) continue;
++    if (st > pos) out.push(text.slice(pos, st));
++    out.push(h("mark", { class: k }, text.slice(st, en))); pos = en;
++  }
++  if (pos < text.length) out.push(text.slice(pos));
++  return out;
++}
++const joinRu = a => a.length < 2 ? a.join("") : a.slice(0, -1).join(", ") + " и " + a[a.length - 1];
++function verdictLine(good, bad) {
++  const g = (good || []).map(x => h("mark", { class: "p" }, x)), b = (bad || []).map(x => h("mark", { class: "n" }, x));
++  const j = (arr) => arr.flatMap((m, i) => i === 0 ? [m] : [i === arr.length - 1 ? " и " : ", ", m]);
++  if (g.length && b.length) return ["Хвалят ", ...j(g), ", ругают ", ...j(b), "."];
++  if (g.length) return ["Хвалят ", ...j(g), "."];
++  if (b.length) return ["Ругают ", ...j(b), "."];
++  return ["Пока мало отзывов для вывода."];
++}
+ const store = {
+   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
+@@ -52,11 +80,11 @@ function failure(e) {
+ }
+ 
+ /* ---------- иллюстрации товаров (SVG, без внешних файлов) ---------- */
+-const PALETTES = [["#e9e5ff", "#6c5ce7"], ["#e3f0ff", "#3b82f6"], ["#e1f6ee", "#1f9d6b"], ["#ffeede", "#e8833a"], ["#f1e6fa", "#a24fd1"], ["#e6edf5", "#51657d"]];
++const PALETTES = [["#eef2f1", "#cfd8d6"], ["#eef2f1", "#c3d0cd"], ["#eef2f1", "#d6dedc"], ["#eef2f1", "#bccac7"], ["#eef2f1", "#cad6d3"], ["#eef2f1", "#d0dad7"]];
+ function artSvg(cat, color) {
+-  if (cat === "ноутбуки") return `<svg viewBox="0 0 160 110"><rect x="26" y="10" width="108" height="72" rx="7" fill="#1b2142"/><rect x="31" y="15" width="98" height="62" rx="3" fill="${color}"/><path d="M8 88h144l-10 12H18z" fill="#2b335c"/></svg>`;
+-  if (cat === "наушники") return `<svg viewBox="0 0 120 120"><path d="M20 70V60a40 40 0 0 1 80 0v10" fill="none" stroke="#1b2142" stroke-width="9" stroke-linecap="round"/><rect x="12" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#1b2142" stroke-width="5"/><rect x="84" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#1b2142" stroke-width="5"/></svg>`;
+-  return `<svg viewBox="0 0 70 130"><rect x="4" y="4" width="62" height="122" rx="14" fill="#1b2142"/><rect x="9" y="12" width="52" height="106" rx="8" fill="${color}"/><rect x="27" y="7" width="16" height="4" rx="2" fill="#0d1130"/></svg>`;
++  if (cat === "ноутбуки") return `<svg viewBox="0 0 160 110"><rect x="26" y="10" width="108" height="72" rx="7" fill="#0b1f1d"/><rect x="31" y="15" width="98" height="62" rx="3" fill="${color}"/><path d="M8 88h144l-10 12H18z" fill="#2a4743"/></svg>`;
++  if (cat === "наушники") return `<svg viewBox="0 0 120 120"><path d="M20 70V60a40 40 0 0 1 80 0v10" fill="none" stroke="#0b1f1d" stroke-width="9" stroke-linecap="round"/><rect x="12" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#0b1f1d" stroke-width="5"/><rect x="84" y="66" width="24" height="38" rx="10" fill="${color}" stroke="#0b1f1d" stroke-width="5"/></svg>`;
++  return `<svg viewBox="0 0 70 130"><rect x="4" y="4" width="62" height="122" rx="14" fill="#0b1f1d"/><rect x="9" y="12" width="52" height="106" rx="8" fill="${color}"/><rect x="27" y="7" width="16" height="4" rx="2" fill="#0b1f1d"/></svg>`;
+ }
+ function art(p, big) {
+   const [bg, fg] = PALETTES[p.product_id % PALETTES.length];
+@@ -77,16 +105,18 @@ function updateCompareBadge() { const b = $("#cmp-count"); b.textContent = compa
+ 
+ function productCard(p) {
+   const inCmp = compareIds.includes(p.product_id);
+-  const art_ = art(p); art_.append(h("span", { class: "badge" }, "✦ " + (p.ai_badge || "AI-анализ")));
+   return h("article", { class: "card clickable", onclick: e => { if (!e.target.closest("button, a")) location.hash = "#/product/" + p.product_id; } },
+-    art_,
+-    h("h3", {}, p.title),
+-    h("div", { class: "rate" }, h("span", { class: "star" }, "★ "), (p.rating != null ? Number(p.rating).toFixed(1) : "—"), " · ", p.n_reviews, " отзывов"),
+-    h("div", { class: "aspects" }, (p.top_aspects || []).map(a => h("span", { class: "tag good" }, "👍 " + a))),
+-    h("div", { class: "price" }, fmt(p.price)),
++    h("div", { style: "display:flex;justify-content:space-between;gap:12px;align-items:baseline" },
++      h("h3", { style: "margin:0" }, p.title), h("span", { class: "price" }, fmt(p.price))),
++    h("p", { class: "serif", style: "margin:4px 0 2px;font-size:19px;line-height:1.4" }, verdictLine(p.top_aspects, p.weak_aspects)),
++    h("div", { style: "display:flex;flex-direction:column;gap:7px;margin:8px 0" }, (p.aspect_bars || []).map(a =>
++      h("div", { class: "bar-mini" }, h("span", {}, cap(a.aspect)),
++        h("span", { class: "bar", role: "img", "aria-label": `${a.aspect}: ${pct(a.pos_share)} положительных`, style: "height:5px" }, h("i", { style: `width:${pct(a.pos_share)};background:${a.pos_share < 0.6 ? "#d8574a" : "#3aa76d"}` })),
++        h("b", {}, pct(a.pos_share))))),
++    h("div", { class: "rate" }, (p.rating != null ? "★ " + Number(p.rating).toFixed(1) + " · " : ""), p.n_reviews, " отзывов"),
+     h("div", { class: "btns" },
+-      h("a", { class: "btn", href: "#/product/" + p.product_id }, "Подробнее →"),
+-      h("button", { class: "btn", type: "button", "aria-pressed": inCmp, onclick: () => toggleCompare(p.product_id) }, inCmp ? "✓ В сравнении" : "Сравнить")));
++      h("a", { class: "btn", href: "#/product/" + p.product_id }, "Подробнее"),
++      h("button", { class: "btn", type: "button", "aria-pressed": inCmp, onclick: () => toggleCompare(p.product_id) }, inCmp ? "В сравнении" : "Сравнить")));
+ }
+ 
+ /* ---------- страницы ---------- */
+@@ -105,7 +135,7 @@ function tryReviewPanel() {
+         h("small", { class: "muted" }, "Общая тональность: " + SENT_RU[r.overall] + " · модель: " + r.model));
+     } catch (e) { box.replaceChildren(h("p", { class: "muted" }, e.message)); }
+   };
+-  return h("section", { class: "panel ai try" }, h("h3", {}, "✦ Проверьте, как ИИ читает отзыв"),
++  return h("section", { class: "panel try" }, h("h3", {}, "Проверьте, как ИИ читает отзыв"),
+     h("p", { class: "hint" }, "Напишите отзыв своими словами: ИИ разобьёт его на части, найдёт аспекты и определит тональность каждой."),
+     ta, h("button", { class: "btn primary", onclick: run }, "Разобрать отзыв"), box);
+ }
+@@ -116,22 +146,23 @@ async function pageHome() {
+     const data = await api("/api/products?sort=rating");
+     const cats = [["смартфоны", "Смартфоны", "смартфоны"], ["ноутбуки", "Ноутбуки", "ноутбуки"], ["наушники", "Наушники", "наушники"]];
+     view.replaceChildren(
+-      h("section", { class: "hero" },
+-        h("div", {},
+-          h("div", { class: "eyebrow", style: "color:#b5abff" }, "AI Market · платформа анализа отзывов"),
+-          h("h1", {}, "ИИ превращает отзывы в ", h("span", { class: "ai-word" }, "решения")),
+-          h("p", {}, "Покупатель получает готовый разбор товара по аспектам с цитатами из отзывов. Продавец видит, на что жалуются клиенты, и замечает проблему раньше, чем упадёт рейтинг."),
+-          h("div", { class: "btns" },
+-            h("a", { class: "btn primary", href: "#/catalog" }, "Я покупатель"),
+-            h("button", { class: "btn", type: "button", onclick: sellerEntry }, "Я продавец"),
+-            h("button", { class: "btn", type: "button", onclick: () => openChat() }, "✦ Спросить AI"))),
+-        h("div", { class: "hero-art" }, ["смартфоны", "ноутбуки", "наушники"].map((c, i) => h("div", { html: artSvg(c, PALETTES[i][1]), style: "width:100px" })))),
++      h("section", { class: "hero intro" },
++        h("div", { class: "eyebrow" }, "Платформа анализа отзывов"),
++        h("h1", {}, "Выбирайте по тому, что пишут покупатели"),
++        h("p", {}, "Спросите словами или выберите категорию. ИИ разберёт отзывы и покажет, что хвалят и за что ругают."),
++        h("form", { class: "ask", onsubmit: e => { e.preventDefault(); const v = e.target.q.value.trim(); if (v) openChat(v); } },
++          h("input", { name: "q", maxlength: 300, placeholder: "Например: смартфон до 300 000 ₸ с хорошей камерой", "aria-label": "Вопрос AI-консультанту" }),
++          h("button", { class: "btn primary", type: "submit" }, "Спросить AI")),
++        h("div", { class: "ask-chips" }, ["Как батарея у iPhone 15", "Сравни iPhone 15 и Galaxy S24 FE", "Сколько стоит доставка"].map(t => h("button", { type: "button", onclick: () => openChat(t) }, t))),
++        h("div", { class: "btns" },
++          h("a", { class: "btn", href: "#/catalog" }, "Каталог"),
++          h("button", { class: "btn", type: "button", onclick: sellerEntry }, "Я продавец"))),
+       tryReviewPanel(),
+-      h("h2", {}, "Популярные категории"),
++      h("h2", {}, "Категории"),
+       h("div", { class: "tiles" }, cats.map(([key, name], i) =>
+-        h("a", { class: "tile", href: "#/catalog?category=" + encodeURIComponent(key) }, h("div", { html: artSvg(key, PALETTES[i][1]), style: "width:54px" }), h("div", {}, h("b", {}, name), h("span", { class: "muted" }, "с AI-анализом отзывов"))))),
+-      h("h2", {}, "✦ Рекомендации AI"),
+-      h("p", { class: "muted", style: "margin-top:-8px" }, "Лучшие по оценке покупателей среди проанализированных отзывов"),
++        h("a", { class: "tile", href: "#/catalog?category=" + encodeURIComponent(key) }, h("div", { html: artSvg(key, PALETTES[i][1]), style: "width:54px" }), h("div", {}, h("b", {}, name), h("span", { class: "muted" }, "разбор отзывов по аспектам"))))),
++      h("h2", {}, "Лучшие по отзывам"),
++      h("p", { class: "muted", style: "margin-top:-8px" }, "Товары с самой высокой оценкой среди проанализированных отзывов"),
+       h("div", { class: "grid" }, data.items.slice(0, 4).map(productCard)));
+   } catch (e) { failure(e); }
+ }
+@@ -164,9 +195,9 @@ async function pageCatalog(q) {
+       [["popular", "По популярности"], ["rating", "По рейтингу"], ["price_asc", "Сначала дешевле"], ["price_desc", "Сначала дороже"]].map(([v, t]) => h("option", { value: v, selected: f.sort === v }, t)));
+     view.replaceChildren(
+       h("div", { class: "crumbs" }, h("a", { href: "#/" }, "Главная"), " / Каталог"),
+-      h("div", { class: "toolbar" }, h("div", {}, h("div", { class: "eyebrow" }, "Каталог"), h("h1", { style: "margin:0" }, f.q ? `Поиск: «${f.q}»` : "Техника, которой доверяют"),
++      h("div", { class: "toolbar" }, h("div", {}, h("div", { class: "eyebrow" }, "Каталог"), h("h1", { style: "margin:0" }, f.q ? `Поиск: «${f.q}»` : "Выбирайте по отзывам"),
+         h("span", { class: "muted" }, `${data.total} товаров с AI-анализом отзывов`)),
+-        h("button", { class: "btn", type: "button", onclick: () => openChat("Помоги подобрать " + (f.category || "товар")) }, "✦ Подобрать с AI")),
++        h("button", { class: "btn primary", type: "button", onclick: () => openChat("Помоги подобрать " + (f.category || "товар")) }, "Подобрать с AI")),
+       h("div", { class: "layout" }, filters, h("div", {}, h("div", { class: "toolbar" }, h("span", {}), sel),
+         data.items.length ? h("div", { class: "grid" }, data.items.map(productCard)) : h("div", { class: "empty" }, "Ничего не найдено. Измените фильтры или спросите AI-консультанта."))));
+   } catch (e) { failure(e); }
+@@ -174,7 +205,7 @@ async function pageCatalog(q) {
+ 
+ function barRow(a) {
+   return h("div", { class: "bar-row" }, h("span", {}, a.aspect[0].toUpperCase() + a.aspect.slice(1)),
+-    h("div", { class: "bar", role: "img", "aria-label": `${a.aspect}: ${pct(a.pos_share)} положительных` }, h("i", { style: `width:${pct(a.pos_share)}` })),
++    h("div", { class: "bar", role: "img", "aria-label": `${a.aspect}: ${pct(a.pos_share)} положительных` }, h("i", { style: `width:${pct(a.pos_share)};background:${a.pos_share < 0.6 ? "#d8574a" : "#3aa76d"}` })),
+     h("small", {}, `${pct(a.pos_share)} · ${Math.round(a.n_mentions)} упом.`));
+ }
+ 
+@@ -209,27 +240,27 @@ async function pageProduct(id) {
+           h("dl", { class: "specs" }, Object.entries(p.specs).flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+           h("div", { class: "btns" },
+             h("button", { class: "btn primary", type: "button", onclick: () => toast("Демо: корзина не реализована") }, "В корзину"),
+-            h("button", { class: "btn", type: "button", onclick: () => toggleCompare(p.product_id) }, inCmp ? "✓ В сравнении" : "Сравнить"),
+-            h("button", { class: "btn", type: "button", onclick: () => openChat("Что покупатели говорят про " + p.title) }, "✦ Спросить AI")))),
++            h("button", { class: "btn", type: "button", onclick: () => toggleCompare(p.product_id) }, inCmp ? "В сравнении" : "Сравнить"),
++            h("button", { class: "btn", type: "button", onclick: () => openChat("Что покупатели говорят про " + p.title) }, "Спросить AI")))),
+       h("section", { class: "panel ai" },
+-        h("div", { class: "eyebrow" }, "✦ Что говорят покупатели"),
++        h("div", { class: "eyebrow" }, `Вывод по ${p.n_analyzed} отзывам`),
++        h("p", { class: "verdict" }, verdictLine(p.strengths.slice(0, 2), p.weaknesses.slice(0, 2))),
+         h("div", { style: "display:flex;gap:30px;flex-wrap:wrap;align-items:center;margin:10px 0 18px" },
+           h("div", {}, h("div", { class: "big" }, p.sentiment.positive + "%"), h("span", { class: "muted" }, "положительных отзывов")),
+           h("div", { style: "flex:1;min-width:240px" },
+             h("div", { class: "stack", role: "img", "aria-label": `Тональность: ${p.sentiment.positive}% положительных, ${p.sentiment.neutral}% нейтральных, ${p.sentiment.negative}% отрицательных` },
+-              h("i", { style: `width:${p.sentiment.positive}%;background:var(--good)` }), h("i", { style: `width:${p.sentiment.neutral}%;background:#b9bfd8` }), h("i", { style: `width:${p.sentiment.negative}%;background:var(--bad)` })),
+-            h("div", { class: "legend" }, h("span", {}, h("b", { style: "background:var(--good)" }), "положительные " + p.sentiment.positive + "%"), h("span", {}, h("b", { style: "background:#b9bfd8" }), "нейтральные " + p.sentiment.neutral + "%"), h("span", {}, h("b", { style: "background:var(--bad)" }), "отрицательные " + p.sentiment.negative + "%")))),
++              h("i", { style: `width:${p.sentiment.positive}%;background:var(--good)` }), h("i", { style: `width:${p.sentiment.neutral}%;background:var(--neutral)` }), h("i", { style: `width:${p.sentiment.negative}%;background:var(--bad)` })),
++            h("div", { class: "legend" }, h("span", {}, h("b", { style: "background:var(--good)" }), "положительные " + p.sentiment.positive + "%"), h("span", {}, h("b", { style: "background:var(--neutral)" }), "нейтральные " + p.sentiment.neutral + "%"), h("span", {}, h("b", { style: "background:var(--bad)" }), "отрицательные " + p.sentiment.negative + "%")))),
+         h("h3", {}, "Оценка по аспектам"), shown.length ? shown.map(barRow) : h("p", { class: "muted" }, "Недостаточно упоминаний для оценки по аспектам."),
+-        h("p", {}, h("b", {}, "AI-вывод: "), p.conclusion),
++        h("p", { class: "muted" }, p.conclusion),
+         h("div", { class: "two lists" },
+           h("div", {}, h("h3", {}, "Покупатели чаще всего отмечают"), p.strengths.length ? h("ul", {}, p.strengths.map(s => h("li", {}, s))) : h("span", { class: "muted" }, "—")),
+           h("div", {}, h("h3", {}, "На что жалуются покупатели"), p.weaknesses.length ? h("ul", {}, p.weaknesses.map(s => h("li", {}, s))) : h("span", { class: "muted" }, "Явных проблем не выявлено"))),
+         h("p", { class: "hint" }, `Проанализировано отзывов: ${p.n_analyzed}. Исключено как подозрительные: ${p.n_excluded_suspicious}. Модель тональности: ${p.model}.`)),
+       h("section", { class: "panel", id: "reviews" }, h("h3", {}, "Отзывы, учтённые в AI-анализе"),
+         rv.items.map(r => h("div", { class: "review", id: "review-" + r.review_id },
+-          h("div", { class: "meta" }, h("span", { class: "star", style: "color:#f5a623" }, "★".repeat(r.rating)), h("span", {}, r.date.slice(0, 10)), r.is_verified ? h("span", {}, "✓ покупка подтверждена") : h("span", {}, "покупка не подтверждена"), h("span", { class: "counted" }, "✦ Учтено в AI-анализе"), h("span", {}, "#" + r.review_id)),
+-          h("div", {}, r.text),
+-          h("div", { class: "aspects", style: "margin-top:6px" }, r.aspects.map(a => h("span", { class: "tag " + (a.sentiment === "positive" ? "good" : "bad") }, a.aspect)))))),
++          h("div", { class: "meta" }, h("span", { class: "star", style: "color:#c98a12" }, "★".repeat(r.rating)), h("span", {}, r.date.slice(0, 10)), r.is_verified ? h("span", {}, "покупка подтверждена") : h("span", {}, "покупка не подтверждена"), h("span", { class: "counted" }, "учтён в AI-анализе"), h("span", {}, "#" + r.review_id)),
++          h("div", { class: "txt" }, highlighted(r.text, r.aspects))))),
+       reviewForm);
+     if (location.hash.includes("review=")) { const rid = location.hash.split("review=")[1]; setTimeout(() => $("#review-" + rid)?.scrollIntoView({ block: "center" }), 50); }
+   } catch (e) { failure(e); }
+@@ -247,7 +278,7 @@ async function pageCompare() {
+     const rows = [
+       h("tr", {}, h("th", {}, "Цена"), c.products.map(p => h("td", {}, fmt(p.price)))),
+       h("tr", {}, h("th", {}, "Рейтинг"), c.products.map(p => h("td", {}, "★ " + (p.rating != null ? Number(p.rating).toFixed(1) : "—") + " · " + p.n_reviews + " отзывов"))),
+-      ...c.aspects.map(r => h("tr", {}, h("th", {}, r.aspect[0].toUpperCase() + r.aspect.slice(1), h("span", { class: "ai-mark" }, "✦ AI-анализ отзывов")),
++      ...c.aspects.map(r => h("tr", {}, h("th", {}, r.aspect[0].toUpperCase() + r.aspect.slice(1), ),
+         c.products.map(p => { const v = r.values[String(p.product_id)]; return h("td", { class: r.best === p.product_id ? "best" : "" }, v ? pct(v.pos_share) + " положительных" : "мало данных"); }))),
+       h("tr", {}, h("th", {}, "Плюсы"), c.products.map(p => h("td", {}, p.strengths.join(", ") || "—"))),
+       h("tr", {}, h("th", {}, "Минусы"), c.products.map(p => h("td", {}, p.weaknesses.join(", ") || "—"))),
+@@ -260,12 +291,20 @@ async function pageCompare() {
+ 
+ function lineChart(points) {
+   if (!points.length) return h("p", { class: "muted" }, "Нет данных");
+-  const W = 640, H = 200, P = 30, n = points.length;
+-  const x = i => P + (n === 1 ? (W - 2 * P) / 2 : i * (W - 2 * P) / (n - 1)), y = v => H - P - (v / 100) * (H - 2 * P);
++  const W = 640, H = 220, L = 44, R = 16, T = 16, B = 34, n = points.length;
++  const x = i => L + (n === 1 ? (W - L - R) / 2 : i * (W - L - R) / (n - 1)), y = v => T + (1 - v / 100) * (H - T - B);
+   const d = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(p.positive_pct).toFixed(1)}`).join(" ");
+-  const grid = [0, 50, 100].map(v => `<line x1="${P}" x2="${W - P}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="4" y="${y(v) + 4}" font-size="11" fill="var(--muted)">${v}%</text>`).join("");
+-  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.positive_pct)}" r="4" fill="var(--ai)"/><text x="${x(i)}" y="${H - 8}" font-size="11" text-anchor="middle" fill="var(--muted)">${p.month.slice(5)}.${p.month.slice(2, 4)}</text>`).join("");
+-  return h("div", { class: "chart", role: "img", "aria-label": "Динамика доли положительных отзывов по месяцам", html: `<svg viewBox="0 0 ${W} ${H}">${grid}<path d="${d}" fill="none" stroke="var(--ai)" stroke-width="3"/>${dots}</svg>` });
++  const avg = points.reduce((t, p) => t + p.positive_pct, 0) / n;
++  const grid = [0, 25, 50, 75, 100].map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${L - 8}" y="${y(v) + 4}" font-size="11" text-anchor="end" fill="var(--muted)" font-family="Geist Mono,monospace">${v}%</text>`).join("");
++  const step = Math.ceil(n / 8);
++  const dots = points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.positive_pct)}" r="${i === n - 1 ? 5 : 3.5}" fill="var(--ai)"><title>${p.month}: ${Math.round(p.positive_pct)}%</title></circle>` +
++    (i % step === 0 || i === n - 1 ? `<text x="${x(i)}" y="${H - 12}" font-size="11" text-anchor="middle" fill="var(--muted)" font-family="Geist Mono,monospace">${p.month.slice(5)}.${p.month.slice(2, 4)}</text>` : "")).join("");
++  const last = points[n - 1];
++  const avgLine = `<line x1="${L}" x2="${W - R}" y1="${y(avg)}" y2="${y(avg)}" stroke="var(--muted)" stroke-dasharray="5 4"/><text x="${L + 6}" y="${y(avg) + 16}" font-size="11" fill="var(--muted)">в среднем ${Math.round(avg)}%</text>`;
++  const lab = `<text x="${x(n - 1)}" y="${y(last.positive_pct) - 10}" font-size="12" font-weight="600" text-anchor="end" fill="var(--ai-ink)" font-family="Geist Mono,monospace">${Math.round(last.positive_pct)}%</text>`;
++  return h("div", { class: "chart", role: "img", "aria-label": `Динамика доли положительных отзывов по месяцам, в последнем месяце ${Math.round(last.positive_pct)}%`,
++    html: `<svg viewBox="0 0 ${W} ${H}">${grid}${avgLine}<path d="${d}" fill="none" stroke="var(--ai)" stroke-width="2.5" stroke-linejoin="round"/>${dots}${lab}</svg>` },
++  );
+ }
+ 
+ /* ---------- кабинет продавца: разделы #/seller, /seller/products, /seller/reviews, /seller/analytics, /seller/settings ---------- */
+@@ -288,16 +327,16 @@ function kpis(a) {
+     h("div", { class: "kpi" }, h("b", { style: "color:var(--bad)" }, a.distribution.negative + "%"), "отрицательных"));
+ }
+ function alertBox(al) {
+-  return h("div", { class: "alert", role: "alert" }, "⚠ " + al.message,
+-    h("a", { href: "#/seller/reviews?" + qs({ product_id: al.product_id, aspect: al.aspect, aspect_sentiment: "negative", days: 30 }) }, "Посмотреть отзывы"));
++  return h("div", { class: "alert", role: "alert" }, h("span", { class: "tag-a" }, "АЛЕРТ"), h("div", { class: "msg-a" }, al.message),
++    h("a", { href: "#/seller/reviews?" + qs({ product_id: al.product_id, aspect: al.aspect, aspect_sentiment: "negative", days: 30 }) }, "Смотреть отзывы"));
+ }
+ function aspectRows(list, pid) {
+   return list.map(t => {
+     const tot = t.mentions || 1;
+     return h("div", { class: "bar-row" },
+       h("a", { href: "#/seller/reviews?" + qs({ product_id: pid, aspect: t.aspect }), title: "Показать отзывы с этим аспектом" }, cap(t.aspect)),
+-      h("div", { class: "bar" }, h("i", { style: `width:${Math.round(t.positive / tot * 100)}%` })),
+-      h("small", {}, `${t.positive}👍 ${t.negative}👎`));
++      h("div", { class: "bar" }, h("i", { style: `width:${Math.round(t.positive / tot * 100)}%;background:${t.positive / tot < 0.6 ? "#d8574a" : "#3aa76d"}` })),
++      h("small", {}, `${t.positive} плюс · ${t.negative} минус`));
+   });
+ }
+ 
+@@ -314,12 +353,12 @@ async function pageSeller(sub = "", q = {}) {
+       const { products } = await api("/api/seller/products");
+       view.replaceChildren(sellerShell("products", h("h1", {}, "Мои товары"),
+         h("section", { class: "panel" }, h("div", { class: "tbl-wrap" }, h("table", { class: "cmp" },
+-          h("thead", {}, h("tr", {}, ["Товар", "Цена", "Отзывов", "Оценка", "👍", "👎", "Фейки", "Сигналы", ""].map(t => h("th", {}, t)))),
++          h("thead", {}, h("tr", {}, ["Товар", "Цена", "Отзывов", "Оценка", "Плюс", "Минус", "Подозр.", "Сигналы", ""].map(t => h("th", {}, t)))),
+           h("tbody", {}, products.map(p => h("tr", {},
+             h("td", {}, h("b", {}, p.title), h("br"), h("small", { class: "muted" }, cap(p.category) + " · " + p.brand)),
+             h("td", {}, fmt(p.price)), h("td", {}, p.n_reviews), h("td", {}, p.rating ?? "—"),
+             h("td", {}, p.positive_pct + "%"), h("td", {}, p.negative_pct + "%"), h("td", {}, p.suspicious),
+-            h("td", {}, p.alerts ? h("span", { class: "tag bad" }, "⚠ " + p.alerts) : h("span", { class: "muted" }, "—")),
++            h("td", {}, p.alerts ? h("span", { class: "tag bad" }, "алертов: " + p.alerts) : h("span", { class: "muted" }, "—")),
+             h("td", {}, h("div", { class: "acts" },
+               h("a", { href: "#/seller/reviews?product_id=" + p.product_id }, "Отзывы"),
+               h("a", { href: "#/seller/analytics?product_id=" + p.product_id }, "Аналитика"),
+@@ -356,7 +395,7 @@ async function pageSeller(sub = "", q = {}) {
+             r.overall ? h("span", { class: "tag " + (r.overall === "positive" ? "good" : r.overall === "negative" ? "bad" : "") }, SENT_RU[r.overall]) : null,
+             r.suspicious ? h("span", { class: "tag bad" }, "подозрительный " + Math.round(r.fake_score * 100) + "%") : null,
+             r.is_verified ? null : h("small", { class: "muted" }, "покупка не подтверждена")),
+-          h("p", {}, r.text),
++          h("p", { class: "txt" }, highlighted(r.text, r.aspects)),
+           h("div", { class: "rv-asp" }, r.aspects.map(a => h("span", { class: "tag " + (a.sentiment === "positive" ? "good" : a.sentiment === "negative" ? "bad" : "") }, a.aspect))))) :
+           h("div", { class: "empty" }, h("p", {}, "По выбранным фильтрам отзывов нет."))));
+       return;
+@@ -365,13 +404,17 @@ async function pageSeller(sub = "", q = {}) {
+     const [a, { products }] = await Promise.all([
+       api("/api/seller/analytics?" + qs({ product_id: pid, sensitivity: pr.sensitivity, days: pr.days })),
+       sub === "analytics" ? api("/api/seller/products") : Promise.resolve({ products: [] })]);
+-    const parts = [h("h1", {}, sub === "analytics" ? "✦ AI-аналитика отзывов" : "Обзор")];
++    const parts = [h("h1", {}, sub === "analytics" ? "AI-аналитика отзывов" : "Обзор")];
+     if (sub === "analytics") parts.push(h("div", { class: "toolbar" },
+       h("select", { onchange: e => { location.hash = "#/seller/analytics?" + qs({ product_id: e.target.value }); } }, h("option", { value: "" }, "Все товары"),
+         products.map(p => h("option", { value: p.product_id, selected: String(p.product_id) === String(pid) }, p.title))),
+       h("small", { class: "muted" }, `Период: ${pr.days ? pr.days + " дн." : "всё время"} · чувствительность: ${{ low: "низкая", normal: "обычная", high: "высокая" }[pr.sensitivity]} (меняется в «Настройках»)`)));
++    if (sub !== "analytics") parts.push(h("p", { class: "lead" }, a.alerts.length
++      ? ["Есть тревожный сигнал: ", h("mark", { class: "n" }, a.alerts[0].aspect), ". Остальное без резких изменений."]
++      : ["Резких изменений в жалобах нет. Положительных отзывов ", h("mark", { class: "p" }, a.distribution.positive + "%"), "."]));
+     parts.push(a.alerts.length ? a.alerts.map(alertBox) : h("p", { class: "hint" }, "Резких изменений в жалобах не обнаружено."), kpis(a),
+-      h("section", { class: "panel" }, h("h3", {}, "Динамика тональности"), lineChart(a.dynamics),
++      h("section", { class: "panel" }, h("h3", {}, "Доля положительных отзывов по месяцам"), lineChart(a.dynamics),
++        h("div", { class: "chart-legend" }, h("span", {}, h("i"), "доля положительных, %"), h("span", {}, "пунктир: среднее за период")),
+         h("p", { class: "hint" }, "Доля положительных отзывов по месяцам. Исключено подозрительных отзывов: " + a.suspicious_excluded +
+           (a.suspicious_excluded ? " — " : ""), a.suspicious_excluded ? h("a", { href: "#/seller/reviews?" + qs({ product_id: pid, suspicious: "1" }) }, "показать") : null)));
+     const asp = h("section", { class: "panel" }, h("h3", {}, "Основные аспекты"));
+@@ -446,14 +489,14 @@ function addMsg(role, text, extra = {}) {
+ function openReview(pid, rid) { if (!pid) return; location.hash = `#/product/${pid}?review=${rid}`; if (location.hash.includes("product")) route(); }
+ function openChat(prefill) {
+   chat.hidden = false; $("#chat-fab").hidden = true;
+-  if (!log.children.length) addMsg("bot", "Здравствуйте! Я помогу выбрать товар по отзывам покупателей. Спросите про модель, попросите подобрать или сравнить.");
++  if (!log.children.length) addMsg("bot", "Здравствуйте! Я отвечаю по отзывам покупателей и показываю цитаты. Спросите про модель, попросите подобрать или сравнить.");
+   renderChips(); $("#chat-input").focus();
+   if (typeof prefill === "string") send(prefill);
+ }
+ async function send(text) {
+   text = (text ?? $("#chat-input").value).trim(); if (!text) return;
+   $("#chat-input").value = ""; addMsg("user", text);
+-  const wait = addMsg("bot typing", "Анализирую отзывы…");
++  const wait = addMsg("bot typing", "Читаю отзывы…");
+   try {
+     const r = await api("/api/chat", { method: "POST", body: { message: text, dialog_id: dialogId } });
+     dialogId = r.dialog_id; wait.remove();
+diff --git a/web/index.html b/web/index.html
+index f16673d..71e80a7 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -4,13 +4,15 @@
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+ <title>AI Market — AI-консультант</title>
++<link rel="preconnect" href="https://fonts.googleapis.com">
++<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@500;600&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+ <link rel="stylesheet" href="/static/style.css">
+ </head>
+ <body>
+ <div class="demo-bar">Учебный проект (СРО3). Отзывы и товары в базе — демонстрационные, тексты отзывов сгенерированы по шаблонам.</div>
+ <header class="top">
+   <div class="wrap top-in">
+-    <a class="logo" href="#/"><span class="logo-mark">AI</span>Market</a>
++    <a class="logo" href="#/"><span class="logo-mark">AI</span>AI Market</a>
+     <nav>
+       <a href="#/" data-nav="home">Главная</a>
+       <a href="#/catalog" data-nav="catalog">Каталог</a>
+@@ -26,11 +28,11 @@
+ 
+ <main id="view" class="wrap" tabindex="-1"></main>
+ 
+-<button id="chat-fab" class="fab" type="button"><span class="spark">✦</span> AI-консультант</button>
++<button id="chat-fab" class="fab" type="button">AI-консультант</button>
+ 
+ <section id="chat" class="chat" hidden aria-label="AI-консультант">
+   <div class="chat-head">
+-    <div><strong>✦ AI-консультант</strong><div class="chat-sub" id="chat-model">отвечает по отзывам покупателей</div></div>
++    <div><strong>AI-консультант</strong><div class="chat-sub" id="chat-model">отвечает по отзывам, с цитатами</div></div>
+     <div class="chat-actions">
+       <button id="chat-hist" type="button" title="История диалогов">История</button>
+       <button id="chat-new" type="button" title="Новый диалог">Новый</button>
+diff --git a/web/style.css b/web/style.css
+index 6b5f7fb..737cdea 100644
+--- a/web/style.css
++++ b/web/style.css
+@@ -1,199 +1,233 @@
++/* AI Market: дизайн «среднее» (СРО4): подсветка из цитат, структура таблиц, один акцент цвета морской волны */
+ :root{
+-  --bg:#f6f7fb; --card:#fff; --ink:#141a3a; --muted:#6b7390; --line:#e4e7f2;
+-  --navy:#141a3a; --ai:#6c5ce7; --ai-soft:#efecff; --ai-ink:#4a3fc2;
+-  --good:#1f9d6b; --good-soft:#e3f6ee; --bad:#d6455d; --bad-soft:#fdebee; --warn:#b7791f; --warn-soft:#fff5e0;
+-  --radius:14px; --shadow:0 1px 2px rgba(20,26,58,.05),0 8px 24px rgba(20,26,58,.06);
++  --bg:#f6f7f7; --card:#fff; --ink:#0b1f1d; --muted:#5b6866; --line:#dde2e1;
++  --navy:#0b1f1d; --ai:#0f766e; --ai-soft:#e6f4f1; --ai-ink:#0b5f58;
++  --good:#1f8a55; --good-soft:#e1f4e8; --bad:#c0392b; --bad-soft:#fbe4e0; --warn:#9a4a08; --warn-soft:#fff4e5; --warn-line:#f3c98b;
++  --mark-p:#cdefd8; --mark-n:#f9d2cb; --track:#e3e8e7; --neutral:#c9ced6;
++  --radius:12px;
++  --sans:"Geist",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
++  --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
++  --serif:"Newsreader",Georgia,"Times New Roman",serif;
+ }
+ @media (prefers-color-scheme: dark){
+-  :root{--bg:#0f1226;--card:#171b36;--ink:#eef0fb;--muted:#9aa2c4;--line:#2a3058;--navy:#0b0e20;--ai:#8b7dff;--ai-soft:#25214f;--ai-ink:#c1b9ff;
+-    --good-soft:#12332a;--bad-soft:#3a1a24;--warn-soft:#3a2f14;--shadow:none}
++  :root{--bg:#111514;--card:#181d1c;--ink:#e9efee;--muted:#9aa8a5;--line:#2a3231;--navy:#0b0f0e;--ai:#2dd4bf;--ai-soft:#14302d;--ai-ink:#7fe9db;
++    --good:#4cc38a;--good-soft:#14301f;--bad:#ff8a7a;--bad-soft:#3a1d19;--warn:#f0b36a;--warn-soft:#33260f;--warn-line:#6b4a16;
++    --mark-p:#235a3a;--mark-n:#6a2f28;--track:#2a3231;--neutral:#4a5553}
+ }
+ *{box-sizing:border-box}
+ html{scroll-behavior:smooth}
+-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,"Segoe UI",Inter,Roboto,"Helvetica Neue",Arial,sans-serif}
++body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans)}
+ a{color:inherit;text-decoration:none}
+-button,input,select{font:inherit;color:inherit}
+-.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+-.demo-bar{background:var(--warn-soft);color:var(--warn);font-size:12.5px;text-align:center;padding:6px 12px}
++button,input,select,textarea{font:inherit;color:inherit}
++.wrap{max-width:1180px;margin:0 auto;padding:0 24px}
++.demo-bar{background:var(--warn-soft);color:var(--warn);font-size:12.5px;text-align:center;padding:6px 12px;border-bottom:1px solid var(--warn-line)}
+ .top{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20}
+-.top-in{display:flex;align-items:center;gap:22px;height:64px}
+-.logo{display:flex;align-items:center;gap:8px;font-weight:700;font-size:20px;letter-spacing:-.3px}
+-.logo-mark{background:var(--navy);color:#fff;border-radius:9px;padding:4px 7px;font-size:14px}
+-nav{display:flex;gap:20px}
+-nav a{padding:20px 2px;font-weight:600;color:var(--muted);border-bottom:2px solid transparent}
++.top-in{display:flex;align-items:center;gap:24px;height:60px}
++.logo{display:flex;align-items:center;gap:8px;font-weight:700;font-size:17px}
++.logo-mark{display:inline-block;width:10px;height:10px;background:var(--ai);border-radius:2px;font-size:0;color:transparent;padding:0}
++nav{display:flex;gap:22px}
++nav a{padding:20px 2px;font-weight:500;font-size:14px;color:var(--muted);border-bottom:2px solid transparent}
+ nav a.on,nav a:hover{color:var(--ink);border-color:var(--ai)}
+-.pill{background:var(--ai);color:#fff;border-radius:10px;font-size:11px;padding:1px 6px;margin-left:3px}
+-.search{flex:1;max-width:380px;margin-left:auto}
+-.search input{width:100%;border:1px solid var(--line);background:var(--bg);border-radius:12px;padding:9px 14px}
+-.seller-link{font-weight:600;color:var(--muted);white-space:nowrap}
++nav a.on{font-weight:600}
++.pill{background:var(--ai);color:#fff;border-radius:4px;font-family:var(--mono);font-size:11px;padding:1px 6px;margin-left:3px}
++.search{flex:1;max-width:360px;margin-left:auto}
++.search input{width:100%;border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:8px 12px;font-size:14px}
++.search input:focus,.try textarea:focus,.chat-form input:focus{outline:2px solid var(--ai);outline-offset:1px}
++.seller-link{font-weight:500;font-size:14px;color:var(--muted);white-space:nowrap}
+ .seller-link:hover{color:var(--ink)}
+-.avatar{border:0;background:var(--ai-soft);color:var(--ai-ink);font-weight:700;border-radius:20px;padding:8px 14px;cursor:pointer;white-space:nowrap}
++.avatar{border:0;background:var(--navy);color:#fff;font-weight:600;font-size:14px;border-radius:8px;padding:8px 16px;cursor:pointer;white-space:nowrap}
+ main.wrap{padding-top:28px;padding-bottom:110px;outline:none}
+-h1{font-size:34px;letter-spacing:-.8px;line-height:1.15;margin:.2em 0 .3em}
+-h2{font-size:22px;letter-spacing:-.4px;margin:0 0 14px}
+-h3{margin:0 0 10px}
+-.eyebrow{color:var(--ai);font-size:12px;letter-spacing:1.2px;font-weight:700;text-transform:uppercase}
++h1{font-size:34px;letter-spacing:-.025em;line-height:1.15;margin:.2em 0 .3em;font-weight:700}
++h2{font-size:22px;letter-spacing:-.015em;margin:0 0 14px;font-weight:700}
++h3{margin:0 0 10px;font-weight:600}
++.eyebrow{color:var(--ai);font-size:12px;letter-spacing:.08em;font-weight:700;text-transform:uppercase}
+ .muted{color:var(--muted)}
+ .crumbs{font-size:13px;color:var(--muted);margin-bottom:14px}
+ .crumbs a:hover{color:var(--ink)}
++.serif{font-family:var(--serif)}
++mark{border-radius:3px;padding:1px 3px;color:inherit}
++mark.p{background:var(--mark-p)}
++mark.n{background:var(--mark-n)}
+ 
+-.hero{background:var(--navy);color:#fff;border-radius:22px;padding:44px;display:grid;grid-template-columns:1.3fr 1fr;gap:30px;align-items:center;margin-bottom:34px}
+-.hero p{color:#c9cdea;max-width:520px;font-size:17px}
+-.hero .ai-word{color:#b5abff}
+-.btns{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}
+-.btn{color:var(--ink);text-decoration:none;display:inline-block;border:1px solid var(--line);background:var(--card);padding:10px 18px;border-radius:12px;font-weight:600;cursor:pointer}
++/* главная */
++.intro{padding:30px 0 26px;max-width:860px}
++.intro h1{font-size:40px;margin:0}
++.intro p{font-size:17px;color:var(--muted);max-width:620px;margin:12px 0 0}
++.ask{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--card);border:1.5px solid var(--ai);border-radius:10px;padding:8px 8px 8px 16px;margin-top:22px}
++.ask input{flex:1 1 300px;min-width:0;border:0;background:transparent;font-size:16px;padding:8px 0}
++.ask input:focus{outline:none}
++.ask-chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
++.ask-chips button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:6px 14px;font-size:13px;cursor:pointer}
++.ask-chips button:hover{border-color:var(--ai);color:var(--ai-ink)}
++.btns{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
++.btn{color:var(--ink);text-decoration:none;display:inline-block;border:1px solid var(--line);background:var(--card);padding:9px 16px;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer}
+ .btn:hover{border-color:var(--ai)}
+ .btn.primary{background:var(--ai);border-color:var(--ai);color:#fff}
+-.btn.primary:hover{filter:brightness(1.08)}
++.btn.primary:hover{filter:brightness(1.1)}
+ .btn.block{width:100%;text-align:center}
+ .btn[disabled]{opacity:.6;cursor:wait}
+-.hero-art{display:flex;gap:14px;justify-content:center}
+-.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:34px}
+-.tile{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px;display:flex;gap:14px;align-items:center;box-shadow:var(--shadow);transition:transform .15s}
+-.tile:hover{transform:translateY(-2px);border-color:var(--ai)}
+-.tile svg{width:54px;height:54px;flex:none}
+-.tile b{display:block;font-size:17px}
++.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:26px 0 34px}
++.tile{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px 20px;display:flex;gap:14px;align-items:center;transition:border-color .15s}
++.tile:hover{border-color:var(--ai)}
++.tile svg{width:40px;height:40px;flex:none}
++.tile b{display:block;font-size:16px}
++.tile .muted{font-size:13px}
+ 
+-.layout{display:grid;grid-template-columns:260px 1fr;gap:24px;align-items:start}
+-.filters{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;position:sticky;top:84px}
+-.filters h4{margin:16px 0 8px;font-size:14px}
++/* каталог */
++.layout{display:grid;grid-template-columns:240px 1fr;gap:24px;align-items:start}
++.filters{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;position:sticky;top:76px}
++.filters h4{margin:16px 0 8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+ .filters h4:first-of-type{margin-top:4px}
+ .filters label{display:flex;gap:8px;align-items:center;padding:3px 0;cursor:pointer;font-size:14px}
++.filters input[type=radio]{accent-color:var(--ai)}
+ .filters .row{display:flex;gap:8px}
+-.filters input[type=number]{width:100%;border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:7px 8px}
++.filters input[type=number]{width:100%;border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:7px 8px;font-family:var(--mono);font-size:13px}
+ .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:12px;flex-wrap:wrap}
+-.toolbar select{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:8px 10px}
+-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:18px}
+-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:8px}
++.toolbar select{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:8px 10px;max-width:100%}
++.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:16px}
++.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px;display:flex;flex-direction:column;gap:8px}
+ .art{border-radius:10px;height:150px;display:grid;place-items:center;position:relative}
+ .art svg{height:112px;width:auto}
+-.badge{position:absolute;top:8px;left:8px;background:var(--card);color:var(--ai-ink);font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}
+-.card h3{font-size:16px;margin:2px 0 0}
++.badge{display:none}
++.card h3{font-size:17px;margin:4px 0 0}
+ .rate{font-size:13px;color:var(--muted)}
+-.rate .star{color:#f5a623}
+-.price{font-size:19px;font-weight:700}
++.rate .star{color:#c98a12}
++.price{white-space:nowrap;font-family:var(--mono);font-size:17px;font-weight:600}
+ .aspects{display:flex;gap:6px;flex-wrap:wrap}
+-.tag{font-size:12px;border-radius:8px;padding:2px 8px;background:var(--ai-soft);color:var(--ai-ink);font-weight:600}
+-.tag.good{background:var(--good-soft);color:var(--good)}
+-.tag.bad{background:var(--bad-soft);color:var(--bad)}
+-.card .btns{margin-top:auto}
+-.card .btn{padding:8px 12px;font-size:14px}
++.tag{font-size:12px;border-radius:4px;padding:2px 8px;background:var(--ai-soft);color:var(--ai-ink);font-weight:600}
++.tag.good{background:var(--mark-p);color:var(--ink)}
++.tag.bad{background:var(--mark-n);color:var(--ink)}
++.card .btns{margin-top:auto;padding-top:6px}
++.card .btn{padding:8px 12px;font-size:13px}
+ .card .btns .btn:first-child{flex:1;background:var(--bg)}
++.card.clickable{cursor:pointer;transition:border-color .15s}
++.card.clickable:hover{border-color:var(--ai)}
+ 
+-.pdp{display:grid;grid-template-columns:420px 1fr;gap:30px;margin-bottom:30px}
+-.pdp .art{height:380px}
+-.pdp .art svg{height:290px}
+-.specs{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:14px 0}
++/* карточка товара */
++.pdp{display:grid;grid-template-columns:300px 1fr;gap:28px;margin-bottom:24px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:24px}
++.pdp .art{height:260px}
++.pdp .art svg{height:200px}
++.specs{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:14px 0;font-size:14px}
+ .specs dt{color:var(--muted)}
+ .specs dd{margin:0;font-weight:600}
+-.panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px;margin-bottom:20px;box-shadow:var(--shadow)}
+-.panel.ai{border-color:var(--ai);background:linear-gradient(180deg,var(--ai-soft),var(--card) 130px)}
+-.big{font-size:42px;font-weight:800;letter-spacing:-1px;line-height:1}
++.price.big{font-size:26px}
++.panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px;margin-bottom:18px}
++.panel.ai{border-color:var(--line)}
++.verdict{font-family:var(--serif);font-size:26px;line-height:1.35;margin:10px 0 0;max-width:720px}
++.verdict span{display:block}
++.big{font-family:var(--mono);font-size:40px;font-weight:600;letter-spacing:-.03em;line-height:1}
+ .two{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+-.bar-row{display:grid;grid-template-columns:150px 1fr 120px;gap:10px;align-items:center;margin:8px 0;font-size:14px}
+-.bar{height:10px;border-radius:6px;background:var(--bad-soft);overflow:hidden}
+-.bar i{display:block;height:100%;background:var(--good);border-radius:6px}
+-.bar-row small{color:var(--muted);text-align:right}
++.bar-row{display:grid;grid-template-columns:150px 1fr 130px;gap:12px;align-items:center;margin:10px 0;font-size:14px}
++.bar{display:block;height:6px;border-radius:3px;background:var(--track);overflow:hidden}
++.bar i{display:block;height:100%;background:#3aa76d;border-radius:3px}
++.bar-mini{display:grid;grid-template-columns:112px 1fr 36px;gap:10px;align-items:center;font-size:12.5px;color:var(--muted)}
++.bar-mini b{font-family:var(--mono);font-weight:500;text-align:right;color:var(--ink)}
++.bar-row small{color:var(--muted);text-align:right;font-family:var(--mono);font-size:12px}
+ .lists li{margin:6px 0}
+ .lists ul{padding-left:20px;margin:0}
+-.review{border-top:1px solid var(--line);padding:14px 0}
++.review{border-top:1px solid var(--line);padding:16px 0}
+ .review:first-child{border-top:0}
+-.review .meta{font-size:12.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+-.counted{color:var(--ai-ink);font-weight:700}
+-.stack{display:flex;height:14px;border-radius:8px;overflow:hidden;margin:10px 0}
++.review .meta{font-size:12.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
++.review .txt,.rv .txt{font-family:var(--serif);font-size:18px;line-height:1.5}
++.counted{color:var(--ai-ink);font-weight:600}
++.stack{display:flex;height:8px;border-radius:4px;overflow:hidden;margin:10px 0}
+ .stack i{display:block}
+ .legend{display:flex;gap:16px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+ .legend b{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px}
+ 
+ table.cmp{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+ table.cmp th,table.cmp td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+-table.cmp th{background:var(--bg);font-size:14px}
+-table.cmp td.best{background:var(--good-soft);font-weight:700}
+-.ai-mark{font-size:11px;color:var(--ai-ink);font-weight:700;margin-left:6px}
++table.cmp th{background:var(--bg);font-size:13px}
++table.cmp td.best{background:var(--mark-p);font-weight:700}
++.ai-mark{display:none}
+ 
+-.sl{display:grid;grid-template-columns:200px 1fr;gap:24px}
+-.side{background:var(--navy);color:#cfd3f0;border-radius:var(--radius);padding:16px;align-self:start}
+-.side a{display:block;padding:9px 12px;border-radius:9px}
+-.side a.on{background:rgba(255,255,255,.1);color:#fff;font-weight:700}
+-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+-.kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+-.kpi b{font-size:28px;display:block;letter-spacing:-.5px}
+-.alert{background:var(--warn-soft);border:1px solid var(--warn);color:var(--warn);border-radius:var(--radius);padding:14px 18px;margin-bottom:12px;font-weight:600}
+-.alert a{text-decoration:underline;margin-left:8px}
++/* кабинет продавца */
++.sl{display:grid;grid-template-columns:210px 1fr;gap:24px}
++.side{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;align-self:start}
++.side a{display:block;padding:9px 12px;border-radius:6px;font-size:14px;color:var(--muted)}
++.side a:hover{background:var(--bg);color:var(--ink)}
++.side a.on{background:var(--ai-soft);color:var(--ink);font-weight:600}
++.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
++.kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;font-size:13px;color:var(--muted)}
++.kpi b{font-family:var(--mono);font-size:26px;font-weight:600;display:block;color:var(--ink);margin-bottom:2px}
++.lead{font-family:var(--serif);font-size:26px;line-height:1.3;margin:4px 0 18px;max-width:760px}
++.alert{background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--ink);border-radius:10px;padding:14px 18px;margin-bottom:12px;display:flex;gap:12px 16px;flex-wrap:wrap;align-items:center}
++.alert .tag-a{font-family:var(--mono);font-size:11px;font-weight:600;background:var(--warn);color:#fff;border-radius:4px;padding:3px 8px;letter-spacing:.04em}
++.alert .msg-a{flex:1 1 320px;min-width:0}
++.alert a{background:var(--navy);color:#fff;border-radius:6px;padding:8px 14px;font-weight:600;font-size:13px}
+ .chart svg{width:100%;height:auto;display:block}
++.chart-legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:4px}
++.chart-legend i{display:inline-block;width:18px;height:3px;border-radius:2px;background:var(--ai);margin-right:8px;vertical-align:middle}
+ 
+ .empty{text-align:center;color:var(--muted);padding:50px 10px}
+ .err{color:var(--bad);min-height:1.2em;margin:4px 0}
+-.hint{font-size:12px;color:var(--muted)}
++.hint{font-size:12.5px;color:var(--muted)}
+ .skeleton{background:linear-gradient(90deg,var(--line),var(--card),var(--line));background-size:200% 100%;animation:sk 1.2s infinite;border-radius:var(--radius);height:180px}
+ @keyframes sk{to{background-position:-200% 0}}
+ 
+-.fab{position:fixed;right:22px;bottom:22px;background:var(--navy);color:#fff;border:0;border-radius:30px;padding:13px 20px;font-weight:700;cursor:pointer;box-shadow:0 10px 30px rgba(20,26,58,.35);z-index:30}
+-.fab .spark{color:#b5abff}
+-.chat{position:fixed;right:22px;bottom:22px;width:400px;max-width:calc(100vw - 24px);height:600px;max-height:calc(100vh - 44px);background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:0 20px 60px rgba(20,26,58,.3);display:flex;flex-direction:column;z-index:40;overflow:hidden}
++/* чат */
++.fab{position:fixed;right:22px;bottom:22px;background:var(--navy);color:#fff;border:0;border-radius:10px;padding:13px 20px;font-weight:600;cursor:pointer;box-shadow:0 6px 20px rgba(11,31,29,.25);z-index:30}
++.fab .spark{display:none}
++.chat{position:fixed;right:22px;bottom:22px;width:400px;max-width:calc(100vw - 24px);height:600px;max-height:calc(100vh - 44px);background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 48px rgba(11,31,29,.22);display:flex;flex-direction:column;z-index:40;overflow:hidden}
+ .chat[hidden]{display:none}
+-.chat-head{background:var(--navy);color:#fff;padding:12px 14px;display:flex;justify-content:space-between;align-items:center}
+-.chat-sub{font-size:11.5px;color:#aab0d8}
+-.chat-actions button{background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:8px;padding:5px 9px;margin-left:5px;cursor:pointer;font-size:12.5px}
++.chat-head{background:var(--card);border-bottom:1px solid var(--line);padding:14px 16px;display:flex;justify-content:space-between;align-items:center}
++.chat-sub{font-size:12px;color:var(--muted)}
++.chat-actions button{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 9px;margin-left:5px;cursor:pointer;font-size:12.5px}
+ .chat-history{border-bottom:1px solid var(--line);max-height:170px;overflow:auto;background:var(--bg)}
+ .chat-history button{display:block;width:100%;text-align:left;border:0;background:transparent;padding:9px 14px;cursor:pointer;border-bottom:1px solid var(--line);font-size:13px}
+ .chat-history button:hover{background:var(--ai-soft)}
+-.chat-log{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+-.msg{max-width:88%;padding:10px 13px;border-radius:14px;font-size:14px;white-space:pre-wrap;word-wrap:break-word}
+-.msg.user{align-self:flex-end;background:var(--ai);color:#fff;border-bottom-right-radius:4px}
+-.msg.bot{align-self:flex-start;background:var(--ai-soft);border-bottom-left-radius:4px}
+-.msg.bot.warn{background:var(--warn-soft)}
+-.pcard{display:block;margin-top:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 11px;white-space:normal}
++.chat-log{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
++.msg{max-width:90%;padding:10px 14px;border-radius:12px;font-size:14px;white-space:pre-wrap;word-wrap:break-word}
++.msg.user{align-self:flex-end;background:var(--ai);color:#fff;border-bottom-right-radius:3px}
++.msg.bot{align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-bottom-left-radius:3px}
++.msg.bot.warn{background:var(--warn-soft);border-color:var(--warn-line)}
++.pcard{display:block;margin-top:8px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px 12px;white-space:normal}
+ .pcard:hover{border-color:var(--ai)}
+ .pcard small{display:block;color:var(--muted)}
+ .src{margin-top:8px;font-size:12px;color:var(--muted);white-space:normal}
+-.src a{color:var(--ai-ink);font-weight:700;text-decoration:underline;margin-right:6px;cursor:pointer}
+-.chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 8px}
+-.chips button{border:1px solid var(--line);background:var(--card);border-radius:14px;padding:5px 10px;font-size:12.5px;cursor:pointer}
++.src a{color:var(--ai-ink);font-weight:600;text-decoration:underline;margin-right:6px;cursor:pointer}
++.chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 8px}
++.chips button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:5px 11px;font-size:12.5px;cursor:pointer}
+ .chips button:hover{border-color:var(--ai);color:var(--ai-ink)}
+-.chat-form{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)}
+-.chat-form input{flex:1;border:1px solid var(--line);background:var(--bg);border-radius:12px;padding:10px 12px}
+-.chat-form button{border:0;background:var(--ai);color:#fff;border-radius:12px;padding:0 16px;font-weight:700;cursor:pointer}
++.chat-form{display:flex;gap:8px;padding:12px;border-top:1px solid var(--line)}
++.chat-form input{flex:1;border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:10px 12px}
++.chat-form button{border:0;background:var(--navy);color:#fff;border-radius:8px;padding:0 16px;font-weight:600;cursor:pointer}
+ .typing{opacity:.7;font-style:italic}
+ 
+-.dlg{border:0;border-radius:16px;padding:24px;width:360px;max-width:92vw;background:var(--card);color:var(--ink);box-shadow:0 20px 60px rgba(0,0,0,.35)}
+-.dlg::backdrop{background:rgba(10,12,30,.5)}
++.dlg{border:0;border-radius:14px;padding:24px;width:360px;max-width:92vw;background:var(--card);color:var(--ink);box-shadow:0 20px 60px rgba(0,0,0,.35)}
++.dlg::backdrop{background:rgba(8,16,15,.55)}
+ .dlg label{display:block;font-size:13px;color:var(--muted);margin:10px 0}
+-.dlg input{display:block;width:100%;margin-top:4px;border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:9px 10px}
++.dlg input{display:block;width:100%;margin-top:4px;border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:9px 10px}
+ .dlg-row{display:flex;gap:8px;flex-wrap:wrap}
+-.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--navy);color:#fff;padding:10px 18px;border-radius:12px;z-index:60}
+-.form-review textarea{width:100%;min-height:80px;border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:10px;resize:vertical}
+-.form-review select{border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:6px}
+-
+-@media (max-width:900px){
+-  .hero{grid-template-columns:1fr;padding:28px}.hero-art{display:none}
+-  .layout,.pdp,.sl,.two{grid-template-columns:1fr}.filters{position:static}
+-  .tiles{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}
+-  .top-in{flex-wrap:wrap;height:auto;padding:10px 20px;gap:10px}.search{order:5;max-width:none;flex-basis:100%}
+-  nav a{padding:6px 2px}.bar-row{grid-template-columns:110px 1fr 90px}
+-  table.cmp{display:block;overflow-x:auto}
+-  .chat{right:0;bottom:0;width:100vw;max-width:100vw;height:86vh;border-radius:18px 18px 0 0}
+-}
+-@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
++.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--navy);color:#fff;padding:10px 18px;border-radius:8px;z-index:60}
++.form-review textarea{width:100%;min-height:80px;border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:10px;resize:vertical}
++.form-review select{border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:6px}
+ 
+-/* кабинет продавца */
++/* таблицы и отзывы продавца */
+ .tbl-wrap{overflow-x:auto}
+-.acts{white-space:nowrap}.acts .btn{padding:5px 10px;font-size:13px;margin-right:4px}
+-.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0}
+-.toolbar select{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:8px 10px;max-width:100%}
++.acts{display:flex;flex-direction:column;gap:2px;white-space:nowrap}
++.acts a{color:var(--ai-ink);font-weight:600;font-size:13px}.acts a:hover{text-decoration:underline}
+ .chk{display:flex;align-items:center;gap:6px;font-size:14px}
+ .chips-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+ .rv{padding:16px 18px;margin-bottom:12px}.rv.sus{border-color:var(--bad)}
+-.rv-head{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.rv-head span:nth-child(2){color:#e8a317}
++.rv-head{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.rv-head span:nth-child(2){color:#c98a12}
+ .rv p{margin:8px 0}.rv-asp{display:flex;gap:6px;flex-wrap:wrap}
+-.fld{display:block;margin:12px 0;font-weight:600}.fld select{display:block;margin-top:6px;border:1px solid var(--line);background:var(--card);border-radius:10px;padding:8px 10px}
++.fld{display:block;margin:12px 0;font-weight:600}.fld select{display:block;margin-top:6px;border:1px solid var(--line);background:var(--card);border-radius:8px;padding:8px 10px}
+ .bar-row a{font-weight:600}.bar-row a:hover{text-decoration:underline}
+-.side a:hover{background:rgba(255,255,255,.06)}
+ .sl>div{min-width:0}
+ table.cmp td{white-space:nowrap}table.cmp td:first-child{white-space:normal;min-width:170px}
+-.acts{display:flex;gap:4px}table.cmp th{white-space:nowrap}table.cmp td,table.cmp th{padding:10px 10px}
+-.acts{flex-direction:column;gap:2px}.acts a{color:var(--ai-ink);font-weight:600;font-size:13px}.acts a:hover{text-decoration:underline}
+-.try textarea{color:var(--ink);font:inherit;width:100%;border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--card);resize:vertical;margin:6px 0 10px}
++table.cmp th{white-space:nowrap}table.cmp td,table.cmp th{padding:10px 10px}
++.try textarea{color:var(--ink);font:inherit;width:100%;border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--card);resize:vertical;margin:6px 0 10px}
+ .try-out{margin-top:12px}.try .btn{margin-bottom:4px}
+ .try textarea::placeholder{color:var(--muted)}
+-.card.clickable{cursor:pointer;transition:transform .15s,border-color .15s}.card.clickable:hover{transform:translateY(-3px);border-color:var(--ai)}
++
++@media (max-width:900px){
++  .intro h1{font-size:30px}
++  .layout,.pdp,.sl,.two{grid-template-columns:1fr}.filters{position:static}
++  .tiles{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,1fr)}
++  .top-in{flex-wrap:wrap;height:auto;padding:10px 24px;gap:10px}.search{order:5;max-width:none;flex-basis:100%}
++  nav a{padding:6px 2px}.bar-row{grid-template-columns:100px 1fr 100px}
++  table.cmp{display:block;overflow-x:auto}
++  .chat{right:0;bottom:0;width:100vw;max-width:100vw;height:86vh;border-radius:14px 14px 0 0}
++}
++@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
